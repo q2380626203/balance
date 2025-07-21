@@ -1,0 +1,19 @@
+# ESP-IDF构建目录
+build/
+
+# 配置缓存文件
+sdkconfig.old
+
+# Python缓存
+__pycache__/
+*.pyc
+*.pyo
+
+# IDE文件
+.vscode/
+*.swp
+*.swo
+
+# 系统文件
+.DS_Store
+Thumbs.db
