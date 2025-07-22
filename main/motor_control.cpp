@@ -11,11 +11,13 @@
 #define ENABLE_ID           0x0027
 #define VEL_MODE_ID         0x002B      // 设置速度模式的 CAN ID
 #define TARGET_VEL_ID       0x002D      // 发送目标速度的 CAN ID
+#define CLEAR_ERROR_ID      0x0038      // 清除错误和异常的 CAN ID
 
 // CAN 指令数据
 static const uint8_t ENABLE_DATA[]      = {0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}; // 致能马达
 static const uint8_t DISABLE_DATA[]     = {0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}; // 失能马达
 static const uint8_t VEL_DIRECT_MODE_DATA[] = {0x02, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00}; // 速度直接模式数据
+static const uint8_t CLEAR_ERROR_DATA[] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}; // 清除错误和异常数据
 
 // 内部函数声明
 static void send_serial_can_frame(uart_port_t uart_port, const char* cmd_name, 
@@ -105,6 +107,13 @@ void motor_control_set_velocity(motor_controller_t* controller, float velocity) 
                           velocity, controller->velocity_limit);
 }
 
+void motor_control_clear_errors(motor_controller_t* controller) {
+    if (!controller) return;
+
+    clear_motor_errors(controller->driver_config.uart_port);
+    printf("[信息] 电机错误和异常已清除\n");
+}
+
 bool motor_control_is_enabled(motor_controller_t* controller) {
     if (!controller) return false;
     return controller->motor_enabled;
@@ -143,4 +152,8 @@ void move_motor_to_velocity(uart_port_t uart_port, float velocity, float velocit
     uint8_t can_data[8] = {0};
     memcpy(can_data, &velocity, sizeof(velocity)); // Copy float velocity to CAN data
     send_serial_can_frame(uart_port, "MoveToVelocity", TARGET_VEL_ID, can_data, sizeof(can_data));
+}
+
+void clear_motor_errors(uart_port_t uart_port) {
+    send_serial_can_frame(uart_port, "清除错误和异常", CLEAR_ERROR_ID, CLEAR_ERROR_DATA, sizeof(CLEAR_ERROR_DATA));
 }

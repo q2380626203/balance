@@ -29,8 +29,8 @@
 
 // --- 简化的Yaw角度控制参数 ---
 const float TARGET_YAW_ANGLE = 0.0f;      // 目标yaw角度 (度)
-const float YAW_TOLERANCE = 5.0f;       // yaw角度容差 (±5度)
-const float MOTOR_FIXED_SPEED = 10.0f;    // 电机固定转动速度
+const float YAW_TOLERANCE = 3.0f;       // yaw角度容差 (±5度)
+const float MOTOR_FIXED_SPEED = 15.0f;    // 电机固定转动速度
 
 // --- 全局模块句柄 (Global Module Handles) ---
 static gy25t_handle_t* g_gyro_handle = NULL;
@@ -40,85 +40,44 @@ static motor_controller_t* g_motor_controller = NULL;
 // --- 实时显示任务 (Real-time Display Task) ---
 // =====================================================================================
 
-// 实时yaw角度显示任务（类似显示屏效果）
+// 固定显示的实时数据任务
 static void realtime_display_task(void *pvParameters) {
     const TickType_t refresh_rate = pdMS_TO_TICKS(100); // 10Hz刷新频率
     TickType_t last_wake_time = xTaskGetTickCount();
     
-    // 数据频率统计变量
+    // 数据监控变量
     static float last_recorded_yaw = 0.0f;
-    static uint32_t data_update_count = 0;
-    static TickType_t last_freq_calc_time = 0;
-    
-    printf("\033[2J\033[H"); // 清屏并移动光标到左上角
-    printf("╔══════════════════════════════════════════════════╗\n");
-    printf("║               ESP32 平衡车 YAW 角度显示                  ║\n");
-    printf("╠══════════════════════════════════════════════════╣\n");
-    printf("║                                                  ║\n");
-    printf("║      当前 YAW 角度：                              ║\n");
-    printf("║                                                  ║\n");
-    printf("║      目标 YAW 角度：  %.1f°                       ║\n", TARGET_YAW_ANGLE);
-    printf("║      容       差： ±%.1f°                       ║\n", YAW_TOLERANCE);
-    printf("║                                                  ║\n");
-    printf("║      角度偏差：                              ║\n");
-    printf("║      系统状态：                              ║\n");
-    printf("║      数据频率：                              ║\n");
-    printf("║                                                  ║\n");
-    printf("╚══════════════════════════════════════════════════╝\n");
+    static uint32_t total_parsed_count = 0;
     
     while (1) {
         vTaskDelayUntil(&last_wake_time, refresh_rate);
         
         // 获取当前数据
         float current_yaw = g_last_yaw;
-        float yaw_error = current_yaw - TARGET_YAW_ANGLE;
-        bool in_tolerance = (fabs(yaw_error) <= YAW_TOLERANCE);
         
-        // 统计数据更新频率
-        if (fabs(current_yaw - last_recorded_yaw) > 0.01f) { // yaw变化超过0.01度才计数
-            data_update_count++;
+        // 清屏并显示固定界面
+        printf("\033[2J\033[H"); // 清屏并移动光标到左上角
+        printf("╔════════════════════════════════════════════════════════════╗\n");
+        printf("║                ESP32 GY25T 平衡控制系统                   ║\n");
+        printf("╠════════════════════════════════════════════════════════════╣\n");
+        printf("║ 实时数据显示                                             ║\n");
+        printf("║                                                          ║\n");
+        printf("╚════════════════════════════════════════════════════════════╝\n");
+        printf("\n");
+        
+        // 检测数据变化并更新解析信息
+        if (fabs(current_yaw - last_recorded_yaw) > 0.01f) { // yaw变化超过0.01度
+            total_parsed_count++;
             last_recorded_yaw = current_yaw;
         }
         
-        TickType_t current_time = xTaskGetTickCount();
-        float data_frequency = 0.0f;
-        if (current_time - last_freq_calc_time >= pdMS_TO_TICKS(1000)) { // 每秒计算一次频率
-            data_frequency = (float)data_update_count;
-            data_update_count = 0;
-            last_freq_calc_time = current_time;
-        }
+        // 固定显示解析信息
+        printf("[成功解析#%04lu] YAW角度更新: %.2f° -> %.2f° (变化%.2f°) - 数据已处理\n", 
+               total_parsed_count, last_recorded_yaw, current_yaw, current_yaw - last_recorded_yaw);
         
-        // 更新显示区域（移动光标到指定位置并更新内容）
-        printf("\033[5;23H"); // 移动到第5行第23列（当前YAW角度位置）
-        printf("\033[K"); // 清除当前行从光标位置到行末
-        if (current_yaw >= 0) {
-            printf("+%.2f°    ", current_yaw);
-        } else {
-            printf("%.2f°    ", current_yaw);
-        }
+        // 显示当前YAW数据
+        printf("当前YAW角度: %.2f°\n", current_yaw);
         
-        printf("\033[10;23H"); // 移动到第10行第23列（角度偏差位置）
-        printf("\033[K");
-        if (yaw_error >= 0) {
-            printf("+%.2f°    ", yaw_error);
-        } else {
-            printf("%.2f°    ", yaw_error);
-        }
-        
-        printf("\033[11;23H"); // 移动到第11行第23列（系统状态位置）
-        printf("\033[K");
-        if (in_tolerance) {
-            printf("\033[32m平衡中 (停止)\033[0m     "); // 绿色
-        } else {
-            printf("\033[31m调节中 (运行)\033[0m     "); // 红色
-        }
-        
-        printf("\033[12;23H"); // 移动到第12行第23列（数据频率位置）
-        printf("\033[K");
-        printf("%.1f Hz        ", data_frequency);
-        
-        // 将光标移动到屏幕底部，避免干扰显示
-        printf("\033[16;1H");
         fflush(stdout);
     }
 }
@@ -165,6 +124,12 @@ static void balance_control_task(void *pvParameters) {
     TickType_t out_of_tolerance_start_time = 0;  // 离开容差区的时间
     const TickType_t enable_delay = pdMS_TO_TICKS(500);  // 500ms延时
     
+    // YAW角变化检测变量
+    float last_yaw = 0.0f;  // 上一次记录的yaw值
+    TickType_t last_yaw_change_time = 0;  // 上次yaw角发生变化的时间
+    const float yaw_change_threshold = 0.01f;  // yaw角变化检测阈值 (度)
+    const TickType_t yaw_no_change_timeout = pdMS_TO_TICKS(500);  // 500ms无yaw变化超时
+    
     // 速度指令发送计时器
     TickType_t xLastVelocityTime = xTaskGetTickCount();
     const TickType_t xVelocityFrequency = pdMS_TO_TICKS(10); // 10ms发送一次速度指令
@@ -175,6 +140,12 @@ static void balance_control_task(void *pvParameters) {
 
         // 1. 数据更新：直接读取全局YAW变量
         current_yaw = g_last_yaw;
+
+        // 检测YAW角是否发生变化
+        if (fabs(current_yaw - last_yaw) > yaw_change_threshold) {
+            last_yaw_change_time = xTaskGetTickCount();
+            last_yaw = current_yaw;
+        }
 
         // 2. 控制逻辑：始终基于最新的YAW角数据执行
         yaw_error = current_yaw - TARGET_YAW_ANGLE;
@@ -195,14 +166,40 @@ static void balance_control_task(void *pvParameters) {
         } else {
             // 在容差区外
             if (last_in_tolerance) {
-                // 刚离开容差区，记录时间
+                // 刚离开容差区，记录时间并初始化yaw变化检测
                 out_of_tolerance_start_time = xTaskGetTickCount();
+                last_yaw_change_time = xTaskGetTickCount();
+                last_yaw = current_yaw;
                 last_in_tolerance = false;
+                printf("[信息] 离开容差区，开始计时\n");
             }
             
-            // 检查是否已经延时500ms
             TickType_t current_time = xTaskGetTickCount();
-            if (current_time - out_of_tolerance_start_time >= enable_delay) {
+            
+            // 检查在容差外是否超过500ms没有yaw角变化
+            if (current_time - last_yaw_change_time >= yaw_no_change_timeout) {
+                printf("[警告] 容差外超过500ms无YAW角变化，清除电机错误并立即重启\n");
+                
+                // 清除电机错误
+                motor_control_clear_errors(g_motor_controller);
+                
+                // 重置状态，重新开始容差外规则
+                out_of_tolerance_start_time = current_time;
+                last_yaw_change_time = current_time;
+                
+                // 立即使能电机三次并发送速度指令
+                printf("[信息] 清理完成，立即使能电机并发送速度指令\n");
+                for (int i = 0; i < 3; i++) {
+                    motor_control_enable(g_motor_controller, true);
+                    vTaskDelay(pdMS_TO_TICKS(10));
+                }
+                
+                // 计算并发送速度指令
+                float motor_speed = (yaw_error > 0) ? MOTOR_FIXED_SPEED : -MOTOR_FIXED_SPEED;
+                motor_control_set_velocity(g_motor_controller, motor_speed);
+                
+                motor_should_run = true;
+            } else if (current_time - out_of_tolerance_start_time >= enable_delay) {
                 // 延时500ms后，发送使能指令并设置速度
                 if (!motor_control_is_enabled(g_motor_controller)) {
                     // 连续发送三次使能指令确保发出

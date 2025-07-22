@@ -64,6 +64,12 @@ void motor_control_enable(motor_controller_t* controller, bool enable);
 void motor_control_set_velocity(motor_controller_t* controller, float velocity);
 
 /**
+ * @brief 清除电机错误和异常
+ * @param controller 电机控制器句柄
+ */
+void motor_control_clear_errors(motor_controller_t* controller);
+
+/**
  * @brief 获取电机使能状态
  * @param controller 电机控制器句柄
  * @return 使能状态
@@ -99,6 +105,12 @@ void disable_motor(uart_port_t uart_port);
  * @param velocity_limit 速度限制
  */
 void move_motor_to_velocity(uart_port_t uart_port, float velocity, float velocity_limit);
+
+/**
+ * @brief 清除电机错误和异常
+ * @param uart_port UART端口
+ */
+void clear_motor_errors(uart_port_t uart_port);
 
 #ifdef __cplusplus
 }
