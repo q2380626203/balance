@@ -18,7 +18,6 @@ static const char *TAG = "GY25T_YAW";
 static gy25t_handle_t* g_interrupt_handle = NULL;
 
 // 静态函数声明
-static void apply_low_pass_filter(gy25t_handle_t* handle, float raw_yaw, float* filtered_yaw);
 static void gy25t_parse_task(void *pvParameters);
 static bool gy25t_parse_packet(gy25t_handle_t* handle, const uint8_t* packet);
 static uint8_t gy25t_calculate_checksum(uint8_t *data, int length);
@@ -40,7 +39,6 @@ gy25t_handle_t* gy25t_init(const gy25t_config_t* config) {
     }
 
     memcpy(&handle->config, config, sizeof(gy25t_config_t));
-    handle->filter.first_read = true;
 
     // 创建原始数据包队列（7字节hex数据，最多2组）
     handle->raw_queue = xQueueCreate(GY25T_RAW_QUEUE_SIZE, sizeof(gy25t_raw_packet_t));
@@ -103,41 +101,13 @@ void gy25t_deinit(gy25t_handle_t* handle) {
     ESP_LOGI(TAG, "GY-25T YAW角模块已销毁");
 }
 
-// 该函数现在由主循环直接管理，此处保留API兼容性
-float gy25t_get_filtered_yaw(gy25t_handle_t* handle) {
-    return handle ? handle->last_yaw : 0.0f;
-}
 
-void gy25t_calibrate_zero_position(gy25t_handle_t* handle) {
-    if (!handle) return;
-    handle->filter.zero_angle = handle->last_yaw;
-    ESP_LOGI(TAG, "GY-25T YAW角零位校准完成，零点角度: %.2f°", handle->filter.zero_angle);
-}
 
-void gy25t_set_output_rate(gy25t_handle_t* handle, gy25t_output_rate_t rate) {
-    if (!handle) return;
-    uint8_t command[4];
-    command[0] = 0xA5;
-    command[1] = 0x04;
-    command[2] = (uint8_t)rate;
-    command[3] = (command[0] + command[1] + command[2]) & 0xFF;
-    uart_write_bytes(handle->config.uart_port, command, sizeof(command));
-    ESP_LOGI(TAG, "发送频率设置指令: %02X %02X %02X %02X", command[0], command[1], command[2], command[3]);
-}
 
 // ====================================================================================
 // --- 静态函数和事件驱动任务 ---
 // ====================================================================================
 
-static void apply_low_pass_filter(gy25t_handle_t* handle, float raw_yaw, float* filtered_yaw) {
-    const float ALPHA_FILTER = 0.5f;  // 提高响应速度：新值占50%，历史值占50%
-    if (handle->filter.first_read) {
-        *filtered_yaw = raw_yaw;
-        handle->filter.first_read = false;
-    } else {
-        *filtered_yaw = ALPHA_FILTER * raw_yaw + (1.0f - ALPHA_FILTER) * (*filtered_yaw);
-    }
-}
 
 // 数据接收和解析任务
 static void gy25t_parse_task(void *pvParameters) {
@@ -154,26 +124,8 @@ static void gy25t_parse_task(void *pvParameters) {
 
     ESP_LOGI(TAG, "GY-25T数据接收解析任务已启动");
 
-    // 主动查询计时器
-    TickType_t last_query_time = xTaskGetTickCount();
-    const TickType_t query_interval = pdMS_TO_TICKS(10); // 10ms查询一次，100Hz
-
     while (1) {
-        // 主动发送查询指令（GY25T可能需要主动查询而不是自动发送）
-        TickType_t current_time = xTaskGetTickCount();
-        if (current_time - last_query_time >= query_interval) {
-            // 发送YAW角查询指令：A4 03 18 02 C1
-            uint8_t query_cmd[] = {0xA4, 0x03, 0x18, 0x02, 0xC1};
-            uart_write_bytes(handle->config.uart_port, query_cmd, sizeof(query_cmd));
-            last_query_time = current_time;
-            
-            static uint32_t query_count = 0;
-            if (++query_count % 1000 == 0) {
-                ESP_LOGI(TAG, "已发送 %lu 个查询指令", query_count);
-            }
-        }
-
-        // 高频读取UART数据（1ms超时，提高响应速度）
+        // 读取UART数据（1ms超时）
         int len = uart_read_bytes(handle->config.uart_port, recv_buf, PARSER_BUFFER_SIZE, pdMS_TO_TICKS(1));
         if (len > 0) {
             // 调试：打印接收到的原始数据

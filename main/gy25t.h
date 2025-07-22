@@ -21,11 +21,6 @@ typedef struct {
     uint64_t timestamp; // 时间戳 (微秒)
 } gy25t_sensor_data_t;
 
-// YAW角滤波配置
-typedef struct {
-    float zero_angle;               // 零位角度 (度)
-    bool first_read;                // 首次读取标志
-} gy25t_filter_t;
 
 // 陀螺仪初始化配置
 typedef struct {
@@ -48,11 +43,6 @@ typedef struct {
     uint8_t data[GY25T_YAW_PACKET_SIZE];    // 7字节原始数据包
 } gy25t_raw_packet_t;
 
-// 输出频率枚举
-typedef enum {
-    GYRO_RATE_100HZ = 0x01, // 100Hz 输出频率
-    GYRO_RATE_200HZ = 0x02  // 200Hz 输出频率
-} gy25t_output_rate_t;
 
 // 统计信息
 typedef struct {
@@ -63,7 +53,6 @@ typedef struct {
 // 陀螺仪句柄结构
 typedef struct {
     gy25t_config_t config;          // 配置信息
-    gy25t_filter_t filter;          // 滤波器
     TaskHandle_t read_task_handle;  // 读取任务句柄
     
     // 原始数据包队列（7字节hex数据，最多2组）
@@ -93,32 +82,6 @@ gy25t_handle_t* gy25t_init(const gy25t_config_t* config);
  */
 void gy25t_deinit(gy25t_handle_t* handle);
 
-/**
- * @brief 获取当前原始YAW角
- * @param handle 陀螺仪句柄
- * @return 原始YAW角度值
- */
-float gy25t_get_raw_yaw(gy25t_handle_t* handle);
-
-/**
- * @brief 获取当前滤波后YAW角
- * @param handle 陀螺仪句柄
- * @return 滤波后YAW角度值
- */
-float gy25t_get_filtered_yaw(gy25t_handle_t* handle);
-
-/**
- * @brief 校准零位角度
- * @param handle 陀螺仪句柄
- */
-void gy25t_calibrate_zero_position(gy25t_handle_t* handle);
-
-/**
- * @brief 设置GY-25T模块的输出频率
- * @param handle 陀螺仪句柄
- * @param rate 输出频率
- */
-void gy25t_set_output_rate(gy25t_handle_t* handle, gy25t_output_rate_t rate);
 
 // === 附加功能接口 ===
 
