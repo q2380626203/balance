@@ -18,19 +18,19 @@
 // =====================================================================================
 
 #define GYRO_UART_PORT      UART_NUM_1
-#define GYRO_UART_TXD       GPIO_NUM_17
-#define GYRO_UART_RXD       GPIO_NUM_16
+#define GYRO_UART_TXD       GPIO_NUM_19
+#define GYRO_UART_RXD       GPIO_NUM_18
 
 #define MOTOR_UART_PORT     UART_NUM_2
-#define MOTOR_UART_TXD      GPIO_NUM_19
-#define MOTOR_UART_RXD      GPIO_NUM_18
+#define MOTOR_UART_TXD      GPIO_NUM_16
+#define MOTOR_UART_RXD      GPIO_NUM_17
 
 #define UART_BUF_SIZE       (1024)
 
 // --- 简化的Yaw角度控制参数 ---
 const float TARGET_YAW_ANGLE = 0.0f;      // 目标yaw角度 (度)
 const float YAW_TOLERANCE = 0.5f;         // yaw角度容差 (±2度)
-const float MOTOR_FIXED_SPEED = 2.0f;    // 电机固定转动速度
+const float MOTOR_FIXED_SPEED = 10.0f;    // 电机固定转动速度
 
 // --- 全局模块句柄 (Global Module Handles) ---
 static gy25t_handle_t* g_gyro_handle = NULL;
@@ -87,11 +87,13 @@ static void uart2_monitor_task(void *pvParameters) {
 static void balance_control_task(void *pvParameters) {
     // 控制周期设置
     const TickType_t xFrequency = pdMS_TO_TICKS(5); // 5ms, 200Hz
+    // 确保xFrequency至少为1，防止断言失败
+    const TickType_t safeFrequency = (xFrequency > 0) ? xFrequency : 1;
     TickType_t xLastWakeTime = xTaskGetTickCount();
 
     // 调试信息打印计时器
     TickType_t xLastPrintTime = xTaskGetTickCount();
-    const TickType_t xPrintFrequency = pdMS_TO_TICKS(1000); // 1000ms 打印一次
+    const TickType_t xPrintFrequency = pdMS_TO_TICKS(10); // 10ms 打印一次，100Hz
 
     // 控制状态变量
     float current_yaw = 0.0f;
@@ -101,18 +103,26 @@ static void balance_control_task(void *pvParameters) {
     TickType_t out_of_tolerance_start_time = 0;  // 离开容差区的时间
     const TickType_t enable_delay = pdMS_TO_TICKS(500);  // 500ms延时
     
+    // 速度指令发送计时器
+    TickType_t xLastVelocityTime = xTaskGetTickCount();
+    const TickType_t xVelocityFrequency = pdMS_TO_TICKS(10); // 10ms发送一次速度指令
+    
     printf("[信息] 简化yaw角度控制任务已启动\n");
     printf("[信息] 控制目标: 保持yaw角度在 %.1f±%.1f 度范围内\n", TARGET_YAW_ANGLE, YAW_TOLERANCE);
     printf("[信息] 电机固定速度: %.1f\n", MOTOR_FIXED_SPEED);
 
     while (1) {
-        vTaskDelayUntil(&xLastWakeTime, xFrequency); // 固定频率运行 (200Hz)
+        vTaskDelayUntil(&xLastWakeTime, safeFrequency); // 固定频率运行 (200Hz)
 
-        // 1. 数据更新：清空队列，只取最新的YAW角数据
+        // 1. 数据更新：获取最新的YAW角数据（不清空整个队列）
         float new_yaw;
-        // 循环读取，直到队列为空，并将最后一个有效值赋给current_yaw
-        while (xQueueReceive(g_gyro_handle->data_queue, &new_yaw, 0) == pdTRUE) {
+        // 只读取一个新值（如果有的话），保持数据的连续性
+        if (xQueueReceive(g_gyro_handle->data_queue, &new_yaw, 0) == pdTRUE) {
             current_yaw = new_yaw;
+            // 清空剩余的旧数据，保留最新的
+            while (xQueueReceive(g_gyro_handle->data_queue, &new_yaw, 0) == pdTRUE) {
+                current_yaw = new_yaw;
+            }
         }
         // 如果队列为空，current_yaw将保持上一次的值
 
@@ -126,7 +136,7 @@ static void balance_control_task(void *pvParameters) {
                 // 连续发送三次失能指令确保发出
                 for (int i = 0; i < 3; i++) {
                     motor_control_enable(g_motor_controller, false);
-                    vTaskDelay(pdMS_TO_TICKS(1)); // 延时1ms
+                    vTaskDelay(pdMS_TO_TICKS(10)); // 延时10ms
                 }
                 motor_control_set_velocity(g_motor_controller, 0.0f);
             }
@@ -148,20 +158,18 @@ static void balance_control_task(void *pvParameters) {
                     // 连续发送三次使能指令确保发出
                     for (int i = 0; i < 3; i++) {
                         motor_control_enable(g_motor_controller, true);
-                        vTaskDelay(pdMS_TO_TICKS(1)); // 延时1ms
+                        vTaskDelay(pdMS_TO_TICKS(10)); // 延时10ms
                     }
                 }
                 
                 motor_should_run = true;
-                float motor_speed = (yaw_error > 0) ? MOTOR_FIXED_SPEED : -MOTOR_FIXED_SPEED;
-                motor_control_set_velocity(g_motor_controller, motor_speed);
             } else {
                 // 延时期间保持失能状态
                 if (motor_control_is_enabled(g_motor_controller)) {
                     // 连续发送三次失能指令确保发出
                     for (int i = 0; i < 3; i++) {
                         motor_control_enable(g_motor_controller, false);
-                        vTaskDelay(pdMS_TO_TICKS(1)); // 延时1ms
+                        vTaskDelay(pdMS_TO_TICKS(10)); // 延时10ms
                     }
                     motor_control_set_velocity(g_motor_controller, 0.0f);
                 }
@@ -169,7 +177,14 @@ static void balance_control_task(void *pvParameters) {
             }
         }
         
-        // 3. 定期打印调试信息
+        // 3. 定期发送速度指令 (10ms频率)
+        if (motor_should_run && (xTaskGetTickCount() - xLastVelocityTime >= xVelocityFrequency)) {
+            float motor_speed = (yaw_error > 0) ? MOTOR_FIXED_SPEED : -MOTOR_FIXED_SPEED;
+            motor_control_set_velocity(g_motor_controller, motor_speed);
+            xLastVelocityTime = xTaskGetTickCount();
+        }
+        
+        // 4. 定期打印调试信息
         if (xTaskGetTickCount() - xLastPrintTime >= xPrintFrequency) {
             gy25t_stats_t gyro_stats;
             gy25t_get_stats(g_gyro_handle, &gyro_stats);
@@ -182,9 +197,11 @@ static void balance_control_task(void *pvParameters) {
             printf("YAW误差  : %8.2f °\n", yaw_error);
             printf("电机状态 : %-4s\n", motor_should_run ? "运行" : "停止");
             printf("设定速度 : %8.1f\n", motor_should_run ? (yaw_error > 0 ? MOTOR_FIXED_SPEED : -MOTOR_FIXED_SPEED) : 0.0f);
-                printf("--- 诊断信息 ---\n");
-                printf("陀螺仪无效包: %-5lu\n", gyro_stats.packets_invalid);
-                printf("------------------\n");
+            printf("--- 诊断信息 ---\n");
+            printf("陀螺仪接收包: %-5lu\n", gyro_stats.packets_received);
+            printf("陀螺仪无效包: %-5lu\n", gyro_stats.packets_invalid);
+            printf("数据队列长度: %-3d\n", (int)uxQueueMessagesWaiting(g_gyro_handle->data_queue));
+            printf("------------------\n");
 
             xLastPrintTime = xTaskGetTickCount();
         }
@@ -215,12 +232,10 @@ extern "C" void app_main(void) {
         return;
     }
 
-#ifdef GYRO_TARGET_FREQ_200HZ
     // 尝试设置陀螺仪输出频率为200Hz
     printf("[信息] 尝试设置GY-25T模块输出频率为200Hz...\n");
     gy25t_set_output_rate(g_gyro_handle, GYRO_RATE_200HZ);
     vTaskDelay(pdMS_TO_TICKS(200)); // 等待设置生效和数据稳定
-#endif
 
     // 初始化电机控制模块
     motor_driver_config_t motor_driver_config = {

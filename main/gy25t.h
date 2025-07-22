@@ -41,6 +41,12 @@ typedef struct {
 #define GY25T_YAW_PACKET_SIZE     7         // YAW角数据包大小：帧头(4字节) + 数据(2字节) + 校验和(1字节)
 #define GY25T_YAW_SCALE_FACTOR    100.0f    // YAW角缩放因子：原始值除以100得到度数
 #define GY25T_RESET_ERROR_COUNT   100       // 连续错误重置阈值
+#define GY25T_RAW_QUEUE_SIZE      2         // 原始数据包队列大小（最多2组）
+
+// 原始数据包结构
+typedef struct {
+    uint8_t data[GY25T_YAW_PACKET_SIZE];    // 7字节原始数据包
+} gy25t_raw_packet_t;
 
 // 输出频率枚举
 typedef enum {
@@ -60,7 +66,8 @@ typedef struct {
     gy25t_filter_t filter;          // 滤波器
     TaskHandle_t read_task_handle;  // 读取任务句柄
     
-    // 使用消息队列在解析任务和主任务之间传递数据，以实现最低延迟
+    // 原始数据包队列（7字节hex数据，最多2组）
+    QueueHandle_t raw_queue;        // 用于传递原始7字节数据包的队列
     QueueHandle_t data_queue;       // 用于传递已解析YAW角数据的队列
     volatile float last_yaw;        // 保存从队列中获取的最后一个YAW角
 
