@@ -17,7 +17,7 @@
 系统采用**单任务高效处理**架构，简化数据流并提升响应速度：
 
 #### 1. **主处理任务** (`gy25t_main_task`)
-位置：`main/gy25t.cpp:100-170`
+位置：`main/gy25t.cpp:100-175`
 
 **核心处理循环**：
 ```c
@@ -73,7 +73,7 @@ static void gy25t_main_task(void *pvParameters) {
 ```
 
 #### 2. **全局变量直接更新**
-位置：`main/gy25t.cpp:170` & `main/gy25t.h:71`
+位置：`main/gy25t.cpp:175` & `main/gy25t.h:71`
 ```c
 // 全局YAW角度变量 - 实时更新
 volatile float g_last_yaw = 0.0f;
@@ -89,31 +89,41 @@ static bool gy25t_parse_packet(gy25t_handle_t* handle, const uint8_t* packet) {
 ```
 
 #### 3. **控制任务中的实时读取**
-位置：`main/main.cpp:114-116`
+位置：`main/main.cpp:141-142`
 ```c
 // 🔥 核心：直接读取全局YAW变量
-float current_yaw = g_last_yaw;  // 零延迟获取最新角度
-float yaw_error = current_yaw - TARGET_YAW_ANGLE;
+current_yaw = g_last_yaw;  // 零延迟获取最新角度
+// YAW误差计算在控制逻辑中进行
 ```
 
 #### 4. **实时显示界面**
-位置：`main/main.cpp:45-95`
+位置：`main/main.cpp:44-83`
 
-**类显示屏的实时刷新界面**：
+**全屏实时刷新界面**：
 ```c
 // 10Hz刷新频率的实时显示
 static void realtime_display_task(void *pvParameters) {
+    const TickType_t refresh_rate = pdMS_TO_TICKS(100); // 10Hz刷新频率
+    TickType_t last_wake_time = xTaskGetTickCount();
+    
     while (1) {
+        vTaskDelayUntil(&last_wake_time, refresh_rate);
+        
         float current_yaw = g_last_yaw;  // 实时读取
         
-        // 更新显示区域（使用ANSI转义序列定位）
-        printf("\033[5;23H");  // 移动到指定位置
-        printf("%.2f°    ", current_yaw);  // 更新yaw角度显示
+        // 清屏并显示固定界面
+        printf("\033[2J\033[H"); // 清屏并移动光标到左上角
+        printf("╔════════════════════════════════════════════════════════════╗\n");
+        printf("║                ESP32 GY25T 平衡控制系统                   ║\n");
+        printf("╠════════════════════════════════════════════════════════════╣\n");
+        printf("║ 实时数据显示                                             ║\n");
+        printf("║                                                          ║\n");
+        printf("╚════════════════════════════════════════════════════════════╝\n");
         
-        printf("\033[12;23H");
-        printf("%.1f Hz", data_frequency);  // 显示数据更新频率
+        // 显示当前YAW数据
+        printf("当前YAW角度: %.2f°\n", current_yaw);
         
-        vTaskDelay(100 / portTICK_PERIOD_MS);  // 10Hz刷新
+        fflush(stdout);
     }
 }
 ```
@@ -219,15 +229,15 @@ idf.py -p /dev/ttyUSB0 monitor
 
 ### 串口输出示例
 ```
---- 实时状态 ---
-YAW角    :     1.23 °
-目标YAW  :     0.00 °  
-YAW误差  :     1.23 °
-电机状态 : 运行
-设定速度 :      2.0
---- 诊断信息 ---
-陀螺仪无效包: 5
-------------------
+╔════════════════════════════════════════════════════════════╗
+║                ESP32 GY25T 平衡控制系统                   ║
+╠════════════════════════════════════════════════════════════╣
+║ 实时数据显示                                             ║
+║                                                          ║
+╚════════════════════════════════════════════════════════════╝
+
+[成功解析#0042] YAW角度更新: 1.20° -> 1.23° (变化0.03°) - 数据已处理
+当前YAW角度: 1.23°
 ```
 
 ## 文件结构
@@ -235,14 +245,20 @@ YAW误差  :     1.23 °
 平衡/
 ├── main/
 │   ├── main.cpp          # 主程序入口和控制逻辑
-│   ├── gy25t.cpp/.h      # GY25T陀螺仪驱动
-│   ├── motor_control.cpp/.h  # 电机控制模块
+│   ├── gy25t.cpp         # GY25T陀螺仪驱动实现
+│   ├── gy25t.h           # GY25T陀螺仪驱动头文件
+│   ├── motor_control.cpp # 电机控制模块实现
+│   ├── motor_control.h   # 电机控制模块头文件
 │   └── CMakeLists.txt    # 主程序构建配置
+├── build/                # 编译输出目录
 ├── CMakeLists.txt        # 项目根配置
-├── sdkconfig            # ESP-IDF配置
-├── partitions.csv       # 分区表配置
-├── gy25t协议.md         # GY25T通信协议说明
-└── README.md           # 项目说明文档
+├── sdkconfig             # ESP-IDF配置
+├── sdkconfig.ci          # CI配置文件
+├── sdkconfig.old         # 配置备份文件
+├── partitions.csv        # 分区表配置
+├── pytest_hello_world.py # 测试脚本
+├── gy25t协议.md          # GY25T通信协议说明
+└── README.md            # 项目说明文档
 ```
 
 ## 协议说明
