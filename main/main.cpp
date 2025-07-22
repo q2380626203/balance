@@ -91,9 +91,9 @@ static void balance_control_task(void *pvParameters) {
     const TickType_t safeFrequency = (xFrequency > 0) ? xFrequency : 1;
     TickType_t xLastWakeTime = xTaskGetTickCount();
 
-    // 调试信息打印计时器
+    // 实时状态显示计时器 - 24帧每秒
     TickType_t xLastPrintTime = xTaskGetTickCount();
-    const TickType_t xPrintFrequency = pdMS_TO_TICKS(1000); // 1000ms 打印一次
+    const TickType_t xPrintFrequency = pdMS_TO_TICKS(42); // 42ms 打印一次 (约24FPS)
 
     // 控制状态变量
     float current_yaw = 0.0f;
@@ -114,13 +114,8 @@ static void balance_control_task(void *pvParameters) {
     while (1) {
         vTaskDelayUntil(&xLastWakeTime, safeFrequency); // 固定频率运行 (200Hz)
 
-        // 1. 数据更新：清空队列，只取最新的YAW角数据
-        float new_yaw;
-        // 循环读取，直到队列为空，并将最后一个有效值赋给current_yaw
-        while (xQueueReceive(g_gyro_handle->data_queue, &new_yaw, 0) == pdTRUE) {
-            current_yaw = new_yaw;
-        }
-        // 如果队列为空，current_yaw将保持上一次的值
+        // 1. 数据更新：直接读取全局YAW变量
+        current_yaw = g_last_yaw;
 
         // 2. 控制逻辑：始终基于最新的YAW角数据执行
         yaw_error = current_yaw - TARGET_YAW_ANGLE;
@@ -180,22 +175,23 @@ static void balance_control_task(void *pvParameters) {
             xLastVelocityTime = xTaskGetTickCount();
         }
         
-        // 4. 定期打印调试信息
+        // 4. 24帧每秒的实时状态显示
         if (xTaskGetTickCount() - xLastPrintTime >= xPrintFrequency) {
             gy25t_stats_t gyro_stats;
             gy25t_get_stats(g_gyro_handle, &gyro_stats);
-
+            
             printf("\033[2J\033[H"); // 清屏并移动光标
             
-            printf("--- 实时状态 ---\n");
-            printf("YAW角    : %8.2f °\n", current_yaw);
+            printf("--- 实时状态 (24FPS) ---\n");
+            printf("YAW角    : %8.2f °\n", g_last_yaw);
             printf("目标YAW  : %8.2f °\n", TARGET_YAW_ANGLE);
             printf("YAW误差  : %8.2f °\n", yaw_error);
             printf("电机状态 : %-4s\n", motor_should_run ? "运行" : "停止");
             printf("设定速度 : %8.1f\n", motor_should_run ? (yaw_error > 0 ? MOTOR_FIXED_SPEED : -MOTOR_FIXED_SPEED) : 0.0f);
-                printf("--- 诊断信息 ---\n");
-                printf("陀螺仪无效包: %-5lu\n", gyro_stats.packets_invalid);
-                printf("------------------\n");
+            printf("--- 诊断信息 ---\n");
+            printf("陀螺仪接收包: %-5lu\n", gyro_stats.packets_received);
+            printf("陀螺仪无效包: %-5lu\n", gyro_stats.packets_invalid);
+            printf("------------------\n");
 
             xLastPrintTime = xTaskGetTickCount();
         }

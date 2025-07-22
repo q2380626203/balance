@@ -53,17 +53,18 @@ typedef struct {
 // 陀螺仪句柄结构
 typedef struct {
     gy25t_config_t config;          // 配置信息
-    TaskHandle_t read_task_handle;  // 读取任务句柄
+    TaskHandle_t parse_task_handle; // 解析任务句柄
     
     // 原始数据包队列（7字节hex数据，最多2组）
     QueueHandle_t raw_queue;        // 用于传递原始7字节数据包的队列
-    QueueHandle_t data_queue;       // 用于传递已解析YAW角数据的队列
-    volatile float last_yaw;        // 保存从队列中获取的最后一个YAW角
 
     // 统计信息
     volatile uint32_t packets_received;
     volatile uint32_t packets_invalid;
 } gy25t_handle_t;
+
+// 全局YAW角度变量
+extern volatile float g_last_yaw;
 
 // ====================================================================================
 // --- GY-25T 陀螺仪模块接口函数 ---
@@ -92,18 +93,6 @@ void gy25t_deinit(gy25t_handle_t* handle);
  */
 void gy25t_get_stats(gy25t_handle_t* handle, gy25t_stats_t* stats);
 
-/**
- * @brief 检查是否有新YAW数据
- * @param handle 陀螺仪句柄
- * @return true表示有新数据
- */
-bool gy25t_has_new_data(gy25t_handle_t* handle);
-
-/**
- * @brief 清除新数据标志
- * @param handle 陀螺仪句柄
- */
-void gy25t_clear_new_data_flag(gy25t_handle_t* handle);
 
 #ifdef __cplusplus
 }
