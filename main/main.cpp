@@ -18,12 +18,12 @@
 // =====================================================================================
 
 #define GYRO_UART_PORT      UART_NUM_1
-#define GYRO_UART_TXD       GPIO_NUM_19
-#define GYRO_UART_RXD       GPIO_NUM_18
+#define GYRO_UART_TXD       GPIO_NUM_11
+#define GYRO_UART_RXD       GPIO_NUM_10
 
 #define MOTOR_UART_PORT     UART_NUM_2
-#define MOTOR_UART_TXD      GPIO_NUM_16
-#define MOTOR_UART_RXD      GPIO_NUM_17
+#define MOTOR_UART_TXD      GPIO_NUM_13
+#define MOTOR_UART_RXD      GPIO_NUM_12
 
 #define UART_BUF_SIZE       (1024)
 
@@ -194,8 +194,8 @@ static void balance_control_task(void *pvParameters) {
                     vTaskDelay(pdMS_TO_TICKS(10));
                 }
                 
-                // 计算并发送速度指令
-                float motor_speed = (yaw_error > 0) ? MOTOR_FIXED_SPEED : -MOTOR_FIXED_SPEED;
+                // 计算并发送速度指令（方向取反）
+                float motor_speed = (yaw_error > 0) ? -MOTOR_FIXED_SPEED : MOTOR_FIXED_SPEED;
                 motor_control_set_velocity(g_motor_controller, motor_speed);
                 
                 motor_should_run = true;
@@ -226,7 +226,7 @@ static void balance_control_task(void *pvParameters) {
         
         // 3. 定期发送速度指令 (10ms频率)
         if (motor_should_run && (xTaskGetTickCount() - xLastVelocityTime >= xVelocityFrequency)) {
-            float motor_speed = (yaw_error > 0) ? MOTOR_FIXED_SPEED : -MOTOR_FIXED_SPEED;
+            float motor_speed = (yaw_error > 0) ? -MOTOR_FIXED_SPEED : MOTOR_FIXED_SPEED;
             motor_control_set_velocity(g_motor_controller, motor_speed);
             xLastVelocityTime = xTaskGetTickCount();
         }
@@ -277,7 +277,7 @@ extern "C" void app_main(void) {
 
 
     // 创建实时显示任务
-    xTaskCreate(realtime_display_task, "realtime_display", 2048, NULL, 3, NULL);
+    xTaskCreate(realtime_display_task, "realtime_display", 4096, NULL, 3, NULL);
     xTaskCreate(uart2_monitor_task, "uart2_monitor", 2048, NULL, 3, NULL);
 
     // 创建集成平衡控制任务
