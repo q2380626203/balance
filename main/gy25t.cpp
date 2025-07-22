@@ -10,6 +10,8 @@
 #include "esp_intr_alloc.h"
 #include "soc/uart_reg.h"
 #include "hal/uart_hal.h"
+#include "esp_private/periph_ctrl.h"
+#include "soc/uart_periph.h"
 
 // 配置
 static const char *TAG = "GY25T_YAW";
@@ -19,15 +21,9 @@ static gy25t_handle_t* g_interrupt_handle = NULL;
 volatile float g_last_yaw = 0.0f;  // 全局YAW角度值
 
 // 静态函数声明
-static void IRAM_ATTR uart_rx_intr_handler(void* arg);
-static void gy25t_parse_task(void *pvParameters);
+static void gy25t_main_task(void *pvParameters);
 static bool gy25t_parse_packet(gy25t_handle_t* handle, const uint8_t* packet);
 static uint8_t gy25t_calculate_checksum(uint8_t *data, int length);
-
-// 原始字节数据结构，用于中断中传递单个字节
-typedef struct {
-    uint8_t byte;
-} gy25t_raw_byte_t;
 
 // ====================================================================================
 // --- GY-25T YAW角模块实现 ---
@@ -47,13 +43,7 @@ gy25t_handle_t* gy25t_init(const gy25t_config_t* config) {
 
     memcpy(&handle->config, config, sizeof(gy25t_config_t));
 
-    // 创建原始字节队列（用于接收单个字节数据，最多32个字节）
-    handle->raw_queue = xQueueCreate(32, sizeof(gy25t_raw_byte_t));
-    if (handle->raw_queue == NULL) {
-        ESP_LOGE(TAG, "原始数据包队列创建失败！");
-        free(handle);
-        return NULL;
-    }
+    // 不需要队列，直接处理
 
     // 初始化全局YAW变量
     g_last_yaw = 0.0f;
@@ -70,37 +60,29 @@ gy25t_handle_t* gy25t_init(const gy25t_config_t* config) {
         .flags = {0}
     };
     
-    // 安装UART驱动（不使用事件队列）
-    ESP_ERROR_CHECK(uart_driver_install(config->uart_port, 0, 0, 0, NULL, 0));
+    // 优化的UART配置，增大接收缓冲区
     ESP_ERROR_CHECK(uart_param_config(config->uart_port, &uart_config));
     ESP_ERROR_CHECK(uart_set_pin(config->uart_port, config->txd_pin, config->rxd_pin, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
-    
-    // 注册自定义串口中断处理函数
-    ESP_ERROR_CHECK(esp_intr_alloc(ETS_UART1_INTR_SOURCE, ESP_INTR_FLAG_IRAM, uart_rx_intr_handler, handle, NULL));
-    
-    // 启用UART接收中断
-    uart_enable_intr_mask(config->uart_port, UART_RXFIFO_FULL_INT_ENA | UART_RXFIFO_TOUT_INT_ENA);
+    ESP_ERROR_CHECK(uart_driver_install(config->uart_port, 1024, 0, 0, NULL, 0));  // 增大接收缓冲区到1024字节
 
     // 设置全局句柄
     g_interrupt_handle = handle;
 
-    // 创建数据解析任务
-    if (xTaskCreate(gy25t_parse_task, "gy25t_parse_task", 4096, handle, 5, &handle->parse_task_handle) != pdPASS) {
-        ESP_LOGE(TAG, "GY-25T解析任务创建失败！");
-        vQueueDelete(handle->raw_queue);
+    // 创建单个主任务（最高优先级，10Hz频率）
+    if (xTaskCreate(gy25t_main_task, "gy25t_main_task", 4096, handle, 10, &handle->main_task_handle) != pdPASS) {
+        ESP_LOGE(TAG, "GY-25T主任务创建失败！");
         uart_driver_delete(config->uart_port);
         free(handle);
         return NULL;
     }
 
-    ESP_LOGI(TAG, "GY-25T YAW角模块在 UART%d 上初始化完成 (硬件中断模式)", config->uart_port);
+    ESP_LOGI(TAG, "GY-25T YAW角模块在 UART%d 上初始化完成 (高速模式)", config->uart_port);
     return handle;
 }
 
 void gy25t_deinit(gy25t_handle_t* handle) {
     if (!handle) return;
-    if (handle->parse_task_handle) vTaskDelete(handle->parse_task_handle);
-    if (handle->raw_queue) vQueueDelete(handle->raw_queue);
+    if (handle->main_task_handle) vTaskDelete(handle->main_task_handle);
     uart_driver_delete(handle->config.uart_port);
     g_interrupt_handle = NULL; // 清除全局句柄
     free(handle);
@@ -111,86 +93,87 @@ void gy25t_deinit(gy25t_handle_t* handle) {
 
 
 // ====================================================================================
-// --- 中断处理程序和解析任务 ---
+// --- 简化的主任务实现 ---
 // ====================================================================================
 
-// 极简的UART接收中断处理函数，只负责接收字节并入队
-static void IRAM_ATTR uart_rx_intr_handler(void* arg) {
-    gy25t_handle_t* handle = (gy25t_handle_t*)arg;
-    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-    
-    // 获取中断状态
-    uint32_t uart_intr_status = REG_READ(UART_INT_ST_REG(UART_NUM_1));
-    
-    // 处理接收中断
-    if (uart_intr_status & (UART_RXFIFO_FULL_INT_ST | UART_RXFIFO_TOUT_INT_ST)) {
-        // 读取FIFO中的所有数据，每个字节直接入队
-        while (REG_GET_FIELD(UART_STATUS_REG(UART_NUM_1), UART_RXFIFO_CNT) > 0) {
-            gy25t_raw_byte_t raw_byte;
-            raw_byte.byte = REG_READ(UART_FIFO_REG(UART_NUM_1)) & 0xFF;
-            
-            // 非阻塞发送到队列
-            if (xQueueSendFromISR(handle->raw_queue, &raw_byte, &xHigherPriorityTaskWoken) != pdTRUE) {
-                // 队列满时，丢弃最旧的字节
-                gy25t_raw_byte_t dummy;
-                xQueueReceiveFromISR(handle->raw_queue, &dummy, &xHigherPriorityTaskWoken);
-                xQueueSendFromISR(handle->raw_queue, &raw_byte, &xHigherPriorityTaskWoken);
-            }
-        }
-        
-        // 清除接收中断标志
-        REG_WRITE(UART_INT_CLR_REG(UART_NUM_1), UART_RXFIFO_FULL_INT_CLR | UART_RXFIFO_TOUT_INT_CLR);
-    }
-    
-    // 如果有更高优先级任务被唤醒，请求任务切换
-    if (xHigherPriorityTaskWoken == pdTRUE) {
-        portYIELD_FROM_ISR();
-    }
-}
-
-// 数据解析任务（从字节队列中组装数据包并解析）
-static void gy25t_parse_task(void *pvParameters) {
+// 主任务：高效处理串口数据并解析
+static void gy25t_main_task(void *pvParameters) {
     gy25t_handle_t* handle = (gy25t_handle_t*)pvParameters;
-    gy25t_raw_byte_t raw_byte;
-    uint8_t parse_buffer[32];
+    uint8_t buffer[64];  // 适中的缓冲区
+    uint8_t parse_buffer[128];  // 解析缓冲区
     int parse_index = 0;
     
-    ESP_LOGI(TAG, "GY-25T数据解析任务已启动");
+    ESP_LOGI(TAG, "GY-25T主任务已启动 (优化模式)");
     
     while (1) {
-        // 从字节队列中获取数据
-        if (xQueueReceive(handle->raw_queue, &raw_byte, portMAX_DELAY) == pdTRUE) {
-            // 将字节添加到解析缓冲区
-            parse_buffer[parse_index++] = raw_byte.byte;
+        // 适当超时读取串口数据，200Hz对应5ms周期
+        int length = uart_read_bytes(handle->config.uart_port, buffer, sizeof(buffer), 10 / portTICK_PERIOD_MS);
+        
+        if (length > 0) {
+            // 调试信息：显示接收到的原始数据
+            // if (length <= 16) {  // 只显示前16个字节
+            //     printf("[接收] ");
+            //     for (int j = 0; j < length; j++) {
+            //         printf("%02X ", buffer[j]);
+            //     }
+            //     printf("\n");
+            // }
             
-            // 缓冲区溢出保护
-            if (parse_index >= sizeof(parse_buffer)) {
-                parse_index = 0;
+            // 添加接收到的数据到解析缓冲区
+            for (int i = 0; i < length && parse_index < sizeof(parse_buffer); i++) {
+                parse_buffer[parse_index++] = buffer[i];
             }
             
-            // 检查是否有完整的GY25T数据包
-            if (parse_index >= GY25T_YAW_PACKET_SIZE) {
-                // 搜索帧头
+            // 持续处理缓冲区中的数据包
+            bool processed_any = true;
+            while (processed_any && parse_index >= GY25T_YAW_PACKET_SIZE) {
+                processed_any = false;
+                
+                // 从缓冲区开始搜索完整数据包
                 for (int i = 0; i <= parse_index - GY25T_YAW_PACKET_SIZE; i++) {
                     if (parse_buffer[i] == 0xA4 && parse_buffer[i+1] == 0x03 && 
                         parse_buffer[i+2] == 0x18 && parse_buffer[i+3] == 0x02) {
                         
-                        // 找到完整数据包，解析并更新last_yaw
-                        gy25t_parse_packet(handle, &parse_buffer[i]);
+                        // 找到完整数据包，显示调试信息
+                        // printf("[解析] 找到数据包: ");
+                        // for (int j = 0; j < GY25T_YAW_PACKET_SIZE; j++) {
+                        //     printf("%02X ", parse_buffer[i + j]);
+                        // }
+                        // printf("\n");
                         
-                        // 移除已处理的数据
-                        int remaining = parse_index - (i + GY25T_YAW_PACKET_SIZE);
-                        if (remaining > 0) {
-                            memmove(parse_buffer, &parse_buffer[i + GY25T_YAW_PACKET_SIZE], remaining);
-                            parse_index = remaining;
-                        } else {
-                            parse_index = 0;
+                        if (gy25t_parse_packet(handle, &parse_buffer[i])) {
+                            // 成功解析，显示yaw值并移除已处理的数据
+                            // printf("[成功] YAW角度更新: %.2f°\n", g_last_yaw);
+                            int consumed = i + GY25T_YAW_PACKET_SIZE;
+                            int remaining = parse_index - consumed;
+                            if (remaining > 0) {
+                                memmove(parse_buffer, &parse_buffer[consumed], remaining);
+                                parse_index = remaining;
+                            } else {
+                                parse_index = 0;
+                            }
+                            processed_any = true;
+                            break;
                         }
-                        break;
                     }
                 }
+                
+                // 如果没有处理任何包且缓冲区满了，清理最旧的数据
+                if (!processed_any && parse_index >= sizeof(parse_buffer)) {
+                    memmove(parse_buffer, &parse_buffer[1], parse_index - 1);
+                    parse_index--;
+                }
+            }
+            
+            // 如果缓冲区仍然满了，重置
+            if (parse_index >= sizeof(parse_buffer)) {
+                parse_index = 0;
+                ESP_LOGW(TAG, "解析缓冲区重置");
             }
         }
+        
+        // 给其他任务让出时间，但频率仍然很高
+        vTaskDelay(1 / portTICK_PERIOD_MS);
     }
     
     vTaskDelete(NULL);
@@ -216,11 +199,6 @@ static bool gy25t_parse_packet(gy25t_handle_t* handle, const uint8_t* packet) {
     
     handle->packets_received++;
     
-    // 调试信息：每100个包打印一次
-    static uint32_t parse_count = 0;
-    if (++parse_count % 100 == 0) {
-        ESP_LOGI(TAG, "解析第%lu个数据包，YAW=%.2f°", parse_count, calculated_yaw);
-    }
     
     return true;
 }

@@ -10,65 +10,128 @@
 - 电机速度自动调节
 - 实时状态监控和调试信息显示
 
-## 🔥 **实时数据获取方法** 
+## 🔥 **GY25T数据处理方法** 
 
-### **核心实现原理**
+### **当前实现架构（简化单任务模式）**
 
-系统采用**多任务事件驱动**架构获取实时数据：
+系统采用**单任务高效处理**架构，简化数据流并提升响应速度：
 
-#### 1. **数据采集任务** (`gy25t_event_task`)
-位置：`main/gy25t.cpp:121-141`
+#### 1. **主处理任务** (`gy25t_main_task`)
+位置：`main/gy25t.cpp:100-170`
+
+**核心处理循环**：
 ```c
-// 200Hz高频率采集GY25T陀螺仪数据
-while (1) {
-    int len = uart_read_bytes(handle->config.uart_port, dtmp, PARSER_BUFFER_SIZE, pdMS_TO_TICKS(10));
-    if (len > 0) {
-        gy25t_parse_and_send(handle, dtmp, len);  // 实时解析并发送到队列
+static void gy25t_main_task(void *pvParameters) {
+    uint8_t buffer[64];          // 接收缓冲区
+    uint8_t parse_buffer[128];   // 解析缓冲区  
+    int parse_index = 0;
+    
+    while (1) {
+        // 适当超时读取串口数据，200Hz对应5ms周期
+        int length = uart_read_bytes(handle->config.uart_port, buffer, 
+                                   sizeof(buffer), 10 / portTICK_PERIOD_MS);
+        
+        if (length > 0) {
+            // 添加数据到解析缓冲区
+            for (int i = 0; i < length && parse_index < sizeof(parse_buffer); i++) {
+                parse_buffer[parse_index++] = buffer[i];
+            }
+            
+            // 搜索并处理完整数据包
+            bool processed_any = true;
+            while (processed_any && parse_index >= GY25T_YAW_PACKET_SIZE) {
+                processed_any = false;
+                
+                // 搜索帧头 0xA4 0x03 0x18 0x02
+                for (int i = 0; i <= parse_index - GY25T_YAW_PACKET_SIZE; i++) {
+                    if (parse_buffer[i] == 0xA4 && parse_buffer[i+1] == 0x03 && 
+                        parse_buffer[i+2] == 0x18 && parse_buffer[i+3] == 0x02) {
+                        
+                        // 解析并更新全局yaw值
+                        if (gy25t_parse_packet(handle, &parse_buffer[i])) {
+                            // 移除已处理数据，继续处理剩余数据
+                            int consumed = i + GY25T_YAW_PACKET_SIZE;
+                            int remaining = parse_index - consumed;
+                            if (remaining > 0) {
+                                memmove(parse_buffer, &parse_buffer[consumed], remaining);
+                                parse_index = remaining;
+                            } else {
+                                parse_index = 0;
+                            }
+                            processed_any = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        
+        // 让出CPU时间给其他任务
+        vTaskDelay(1 / portTICK_PERIOD_MS);
     }
 }
 ```
 
-#### 2. **实时队列机制** (`data_queue`)
-位置：`main/gy25t.h:64`
+#### 2. **全局变量直接更新**
+位置：`main/gy25t.cpp:170` & `main/gy25t.h:71`
 ```c
-QueueHandle_t data_queue;  // 用于传递已解析YAW角数据的队列
-```
+// 全局YAW角度变量 - 实时更新
+volatile float g_last_yaw = 0.0f;
 
-**滑动窗口队列管理**（`gy25t.cpp:174-179`）:
-```c
-// 队列满时自动丢弃旧数据，保证最新数据优先级
-if (xQueueSend(handle->data_queue, &filtered_yaw, 0) != pdTRUE) {
-    float dummy;
-    xQueueReceive(handle->data_queue, &dummy, 0);  // 移除最旧数据
-    xQueueSend(handle->data_queue, &filtered_yaw, 0);  // 发送最新数据
+// 解析成功后直接更新全局变量
+static bool gy25t_parse_packet(gy25t_handle_t* handle, const uint8_t* packet) {
+    // ... 数据校验和解析 ...
+    
+    // 直接更新全局变量 
+    g_last_yaw = calculated_yaw;
+    return true;
 }
 ```
 
-#### 3. **实时控制循环** (`balance_control_task`)
-位置：`main/main.cpp:87-192`
-
-**关键实时数据获取代码**（`main.cpp:111-117`）：
+#### 3. **控制任务中的实时读取**
+位置：`main/main.cpp:114-116`
 ```c
-// 🔥 核心：获取最新YAW角数据的实时方法
-float new_yaw;
-// 循环读取队列直到为空，确保使用最新数据
-while (xQueueReceive(g_gyro_handle->data_queue, &new_yaw, 0) == pdTRUE) {
-    current_yaw = new_yaw;  // 更新为最新的YAW角度
+// 🔥 核心：直接读取全局YAW变量
+float current_yaw = g_last_yaw;  // 零延迟获取最新角度
+float yaw_error = current_yaw - TARGET_YAW_ANGLE;
+```
+
+#### 4. **实时显示界面**
+位置：`main/main.cpp:45-95`
+
+**类显示屏的实时刷新界面**：
+```c
+// 10Hz刷新频率的实时显示
+static void realtime_display_task(void *pvParameters) {
+    while (1) {
+        float current_yaw = g_last_yaw;  // 实时读取
+        
+        // 更新显示区域（使用ANSI转义序列定位）
+        printf("\033[5;23H");  // 移动到指定位置
+        printf("%.2f°    ", current_yaw);  // 更新yaw角度显示
+        
+        printf("\033[12;23H");
+        printf("%.1f Hz", data_frequency);  // 显示数据更新频率
+        
+        vTaskDelay(100 / portTICK_PERIOD_MS);  // 10Hz刷新
+    }
 }
-// 如果队列为空，current_yaw保持上一次的有效值
 ```
 
-**实时显示**（`main.cpp:177-189`）：
-```c
-printf("YAW角    : %8.2f °\n", current_yaw);      // 🔥 实时YAW角度
-printf("YAW误差  : %8.2f °\n", yaw_error);       // 🔥 实时控制误差
-printf("电机状态 : %-4s\n", motor_should_run ? "运行" : "停止");  // 🔥 实时电机状态
-```
+### **优化特点**
+
+1. **🚀 零拷贝架构**：数据直接更新到全局变量，无队列开销
+2. **⚡ 高响应速度**：单任务处理，减少上下文切换延迟
+3. **🔄 连续处理**：while循环确保处理缓冲区中的所有数据包
+4. **📊 实时监控**：显示界面实时显示数据处理频率
+5. **🛡️ 缓冲区保护**：智能的溢出处理，避免数据丢失
 
 ### **数据流程图**
 ```
-GY25T陀螺仪 → UART1接收 → 数据解析任务 → 滤波处理 → 队列缓存 → 控制任务 → 实时显示
-   200Hz         10ms         实时解析      低通滤波     50深度     200Hz      1Hz更新
+GY25T陀螺仪 → UART接收 → 单任务解析 → 全局变量更新 → 控制任务读取 → 实时显示
+   200Hz       10ms      连续处理      直接写入        直接读取       10Hz刷新
+    ↓           ↓           ↓             ↓              ↓             ↓
+   发送       快速接收    帧头搜索      g_last_yaw    零延迟获取    可视化界面
 ```
 
 ## 硬件配置
@@ -101,10 +164,10 @@ const float MOTOR_FIXED_SPEED = 2.0f;     // 电机固定转速
 ```
 
 ### 主要任务
-1. **uart1_monitor_task**: 陀螺仪数据监控
-2. **uart2_monitor_task**: 电机数据监控  
-3. **balance_control_task**: 平衡控制主循环
-4. **gy25t_event_task**: GY25T数据解析任务
+1. **gy25t_main_task**: GY25T数据高效解析任务（最高优先级10）
+2. **balance_control_task**: 平衡控制主循环（优先级5）
+3. **realtime_display_task**: 实时显示界面任务（优先级3）
+4. **uart2_monitor_task**: 电机数据监控任务（优先级3）
 
 ## 编译和运行
 

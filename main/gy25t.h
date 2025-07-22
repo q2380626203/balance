@@ -7,6 +7,7 @@
 #include "freertos/semphr.h"
 #include "driver/uart.h"
 #include "driver/gpio.h"
+#include "esp_intr_alloc.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -52,11 +53,8 @@ typedef struct {
 
 // 陀螺仪句柄结构
 typedef struct {
-    gy25t_config_t config;          // 配置信息
-    TaskHandle_t parse_task_handle; // 解析任务句柄
-    
-    // 原始数据包队列（7字节hex数据，最多2组）
-    QueueHandle_t raw_queue;        // 用于传递原始7字节数据包的队列
+    gy25t_config_t config;              // 配置信息
+    TaskHandle_t main_task_handle;      // 主任务句柄
 
     // 统计信息
     volatile uint32_t packets_received;

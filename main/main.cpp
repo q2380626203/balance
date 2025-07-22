@@ -37,26 +37,90 @@ static gy25t_handle_t* g_gyro_handle = NULL;
 static motor_controller_t* g_motor_controller = NULL;
 
 // =====================================================================================
-// --- 串口数据监控任务 (UART Data Monitor Task) ---
+// --- 实时显示任务 (Real-time Display Task) ---
 // =====================================================================================
 
-// 串口1数据监控任务（陀螺仪数据）
-static void uart1_monitor_task(void *pvParameters) {
-    uint8_t* data = (uint8_t*) malloc(UART_BUF_SIZE);
-    printf("[信息] 串口1数据监控任务已启动\n");
+// 实时yaw角度显示任务（类似显示屏效果）
+static void realtime_display_task(void *pvParameters) {
+    const TickType_t refresh_rate = pdMS_TO_TICKS(100); // 10Hz刷新频率
+    TickType_t last_wake_time = xTaskGetTickCount();
+    
+    // 数据频率统计变量
+    static float last_recorded_yaw = 0.0f;
+    static uint32_t data_update_count = 0;
+    static TickType_t last_freq_calc_time = 0;
+    
+    printf("\033[2J\033[H"); // 清屏并移动光标到左上角
+    printf("╔══════════════════════════════════════════════════╗\n");
+    printf("║               ESP32 平衡车 YAW 角度显示                  ║\n");
+    printf("╠══════════════════════════════════════════════════╣\n");
+    printf("║                                                  ║\n");
+    printf("║      当前 YAW 角度：                              ║\n");
+    printf("║                                                  ║\n");
+    printf("║      目标 YAW 角度：  %.1f°                       ║\n", TARGET_YAW_ANGLE);
+    printf("║      容       差： ±%.1f°                       ║\n", YAW_TOLERANCE);
+    printf("║                                                  ║\n");
+    printf("║      角度偏差：                              ║\n");
+    printf("║      系统状态：                              ║\n");
+    printf("║      数据频率：                              ║\n");
+    printf("║                                                  ║\n");
+    printf("╚══════════════════════════════════════════════════╝\n");
     
     while (1) {
-        int len = uart_read_bytes(GYRO_UART_PORT, data, UART_BUF_SIZE, 100 / portTICK_PERIOD_MS);
-        if (len > 0) {
-            // printf("[串口1接收] 长度:%d 数据: ", len);
-            // for (int i = 0; i < len; i++) {
-            //     printf("%02X ", data[i]);
-            // }
-            // printf("\n");
+        vTaskDelayUntil(&last_wake_time, refresh_rate);
+        
+        // 获取当前数据
+        float current_yaw = g_last_yaw;
+        float yaw_error = current_yaw - TARGET_YAW_ANGLE;
+        bool in_tolerance = (fabs(yaw_error) <= YAW_TOLERANCE);
+        
+        // 统计数据更新频率
+        if (fabs(current_yaw - last_recorded_yaw) > 0.01f) { // yaw变化超过0.01度才计数
+            data_update_count++;
+            last_recorded_yaw = current_yaw;
         }
-        vTaskDelay(pdMS_TO_TICKS(10));
+        
+        TickType_t current_time = xTaskGetTickCount();
+        float data_frequency = 0.0f;
+        if (current_time - last_freq_calc_time >= pdMS_TO_TICKS(1000)) { // 每秒计算一次频率
+            data_frequency = (float)data_update_count;
+            data_update_count = 0;
+            last_freq_calc_time = current_time;
+        }
+        
+        // 更新显示区域（移动光标到指定位置并更新内容）
+        printf("\033[5;23H"); // 移动到第5行第23列（当前YAW角度位置）
+        printf("\033[K"); // 清除当前行从光标位置到行末
+        if (current_yaw >= 0) {
+            printf("+%.2f°    ", current_yaw);
+        } else {
+            printf("%.2f°    ", current_yaw);
+        }
+        
+        printf("\033[10;23H"); // 移动到第10行第23列（角度偏差位置）
+        printf("\033[K");
+        if (yaw_error >= 0) {
+            printf("+%.2f°    ", yaw_error);
+        } else {
+            printf("%.2f°    ", yaw_error);
+        }
+        
+        printf("\033[11;23H"); // 移动到第11行第23列（系统状态位置）
+        printf("\033[K");
+        if (in_tolerance) {
+            printf("\033[32m平衡中 (停止)\033[0m     "); // 绿色
+        } else {
+            printf("\033[31m调节中 (运行)\033[0m     "); // 红色
+        }
+        
+        printf("\033[12;23H"); // 移动到第12行第23列（数据频率位置）
+        printf("\033[K");
+        printf("%.1f Hz        ", data_frequency);
+        
+        // 将光标移动到屏幕底部，避免干扰显示
+        printf("\033[16;1H");
+        fflush(stdout);
     }
-    free(data);
 }
 
 // 串口2数据监控任务（电机控制数据）
@@ -91,9 +155,7 @@ static void balance_control_task(void *pvParameters) {
     const TickType_t safeFrequency = (xFrequency > 0) ? xFrequency : 1;
     TickType_t xLastWakeTime = xTaskGetTickCount();
 
-    // 实时状态显示计时器 - 24帧每秒
-    TickType_t xLastPrintTime = xTaskGetTickCount();
-    const TickType_t xPrintFrequency = pdMS_TO_TICKS(42); // 42ms 打印一次 (约24FPS)
+    // 删除了原有的打印变量，由实时显示任务负责
 
     // 控制状态变量
     float current_yaw = 0.0f;
@@ -107,9 +169,6 @@ static void balance_control_task(void *pvParameters) {
     TickType_t xLastVelocityTime = xTaskGetTickCount();
     const TickType_t xVelocityFrequency = pdMS_TO_TICKS(10); // 10ms发送一次速度指令
     
-    printf("[信息] 简化yaw角度控制任务已启动\n");
-    printf("[信息] 控制目标: 保持yaw角度在 %.1f±%.1f 度范围内\n", TARGET_YAW_ANGLE, YAW_TOLERANCE);
-    printf("[信息] 电机固定速度: %.1f\n", MOTOR_FIXED_SPEED);
 
     while (1) {
         vTaskDelayUntil(&xLastWakeTime, safeFrequency); // 固定频率运行 (200Hz)
@@ -175,26 +234,6 @@ static void balance_control_task(void *pvParameters) {
             xLastVelocityTime = xTaskGetTickCount();
         }
         
-        // 4. 24帧每秒的实时状态显示
-        if (xTaskGetTickCount() - xLastPrintTime >= xPrintFrequency) {
-            gy25t_stats_t gyro_stats;
-            gy25t_get_stats(g_gyro_handle, &gyro_stats);
-            
-            printf("\033[2J\033[H"); // 清屏并移动光标
-            
-            printf("--- 实时状态 (24FPS) ---\n");
-            printf("YAW角    : %8.2f °\n", g_last_yaw);
-            printf("目标YAW  : %8.2f °\n", TARGET_YAW_ANGLE);
-            printf("YAW误差  : %8.2f °\n", yaw_error);
-            printf("电机状态 : %-4s\n", motor_should_run ? "运行" : "停止");
-            printf("设定速度 : %8.1f\n", motor_should_run ? (yaw_error > 0 ? MOTOR_FIXED_SPEED : -MOTOR_FIXED_SPEED) : 0.0f);
-            printf("--- 诊断信息 ---\n");
-            printf("陀螺仪接收包: %-5lu\n", gyro_stats.packets_received);
-            printf("陀螺仪无效包: %-5lu\n", gyro_stats.packets_invalid);
-            printf("------------------\n");
-
-            xLastPrintTime = xTaskGetTickCount();
-        }
     }
 }
 
@@ -222,12 +261,6 @@ extern "C" void app_main(void) {
         return;
     }
 
-#ifdef GYRO_TARGET_FREQ_200HZ
-    // 尝试设置陀螺仪输出频率为200Hz
-    printf("[信息] 尝试设置GY-25T模块输出频率为200Hz...\n");
-    // 已移除主动查询功能，无需设置输出频率
-    vTaskDelay(pdMS_TO_TICKS(200)); // 等待设置生效和数据稳定
-#endif
 
     // 初始化电机控制模块
     motor_driver_config_t motor_driver_config = {
@@ -246,8 +279,8 @@ extern "C" void app_main(void) {
     }
 
 
-    // 创建串口数据监控任务
-    xTaskCreate(uart1_monitor_task, "uart1_monitor", 2048, NULL, 3, NULL);
+    // 创建实时显示任务
+    xTaskCreate(realtime_display_task, "realtime_display", 2048, NULL, 3, NULL);
     xTaskCreate(uart2_monitor_task, "uart2_monitor", 2048, NULL, 3, NULL);
 
     // 创建集成平衡控制任务
