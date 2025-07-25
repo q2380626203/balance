@@ -125,10 +125,15 @@ static void balance_control_task(void *pvParameters) {
     const TickType_t enable_delay = pdMS_TO_TICKS(500);  // 500ms延时
     
     // YAW角变化检测变量
-    float last_yaw = 0.0f;  // 上一次记录的yaw值
-    TickType_t last_yaw_change_time = 0;  // 上次yaw角发生变化的时间
-    const float yaw_change_threshold = 0.01f;  // yaw角变化检测阈值 (度)
-    const TickType_t yaw_no_change_timeout = pdMS_TO_TICKS(500);  // 500ms无yaw变化超时
+    float yaw_at_check_start = 0.0f;  // 开始检测时的yaw值
+    TickType_t yaw_check_start_time = 0;  // 开始检测的时间
+    TickType_t last_motor_restart_time = 0;  // 上次电机重启的时间
+    TickType_t last_restart_velocity_time = 0;  // 重启后速度指令发送时间
+    const float yaw_significant_change = 1.0f;  // yaw角显著变化阈值 (1度)
+    const TickType_t yaw_check_timeout = pdMS_TO_TICKS(500);  // 500ms检查超时
+    const TickType_t motor_restart_cooldown = pdMS_TO_TICKS(1500);  // 1.5s电机重启冷却时间
+    const TickType_t restart_velocity_period = pdMS_TO_TICKS(500);  // 重启后500ms高频发送期
+    const TickType_t restart_velocity_freq = pdMS_TO_TICKS(10);  // 重启后10ms发送频率
     
     // 速度指令发送计时器
     TickType_t xLastVelocityTime = xTaskGetTickCount();
@@ -141,10 +146,10 @@ static void balance_control_task(void *pvParameters) {
         // 1. 数据更新：直接读取全局YAW变量
         current_yaw = g_last_yaw;
 
-        // 检测YAW角是否发生变化
-        if (fabs(current_yaw - last_yaw) > yaw_change_threshold) {
-            last_yaw_change_time = xTaskGetTickCount();
-            last_yaw = current_yaw;
+        // 初始化检测起始点（如果还未初始化）
+        if (yaw_check_start_time == 0) {
+            yaw_check_start_time = xTaskGetTickCount();
+            yaw_at_check_start = current_yaw;
         }
 
         // 2. 控制逻辑：始终基于最新的YAW角数据执行
@@ -166,39 +171,49 @@ static void balance_control_task(void *pvParameters) {
         } else {
             // 在容差区外
             if (last_in_tolerance) {
-                // 刚离开容差区，记录时间并初始化yaw变化检测
+                // 刚离开容差区，记录时间并重置yaw变化检测
                 out_of_tolerance_start_time = xTaskGetTickCount();
-                last_yaw_change_time = xTaskGetTickCount();
-                last_yaw = current_yaw;
+                yaw_check_start_time = xTaskGetTickCount();
+                yaw_at_check_start = current_yaw;
                 last_in_tolerance = false;
                 printf("[信息] 离开容差区，开始计时\n");
             }
             
             TickType_t current_time = xTaskGetTickCount();
             
-            // 检查在容差外是否超过500ms没有yaw角变化
-            if (current_time - last_yaw_change_time >= yaw_no_change_timeout) {
-                printf("[警告] 容差外超过500ms无YAW角变化，清除电机错误并立即重启\n");
-                
-                // 清除电机错误
-                motor_control_clear_errors(g_motor_controller);
-                
-                // 重置状态，重新开始容差外规则
-                out_of_tolerance_start_time = current_time;
-                last_yaw_change_time = current_time;
-                
-                // 立即使能电机三次并发送速度指令
-                printf("[信息] 清理完成，立即使能电机并发送速度指令\n");
-                for (int i = 0; i < 3; i++) {
-                    motor_control_enable(g_motor_controller, true);
-                    vTaskDelay(pdMS_TO_TICKS(10));
+            // 检查在容差外是否超过500ms且yaw角变化不超过1度（同时检查冷却时间）
+            if (current_time - yaw_check_start_time >= yaw_check_timeout && 
+                current_time - last_motor_restart_time >= motor_restart_cooldown) {
+                float yaw_change_amount = fabs(current_yaw - yaw_at_check_start);
+                if (yaw_change_amount <= yaw_significant_change) {
+                    printf("[警告] 容差外超过500ms且YAW角变化仅%.2f°(≤1°)，清除电机错误并立即重启\n", yaw_change_amount);
+                    
+                    // 清除电机错误
+                    motor_control_clear_errors(g_motor_controller);
+                    
+                    // 重置状态，重新开始容差外规则
+                    out_of_tolerance_start_time = current_time;
+                    last_motor_restart_time = current_time;  // 记录重启时间
+                    last_restart_velocity_time = current_time;  // 记录重启后速度发送时间
+                    
+                    // 立即使能电机发送速度指令
+                    for (int i = 0; i < 3; i++) {
+                        motor_control_enable(g_motor_controller, true);
+                        vTaskDelay(pdMS_TO_TICKS(10));
+                    }
+                    
+                    // 计算并发送速度指令（方向取反）
+                    float motor_speed = (yaw_error > 0) ? -MOTOR_FIXED_SPEED : MOTOR_FIXED_SPEED;
+                    motor_control_set_velocity(g_motor_controller, motor_speed);
+                    
+                    motor_should_run = true;
+                } else {
+                    printf("[信息] 500ms内YAW角变化%.2f°(>1°)，重置检测计时器\n", yaw_change_amount);
                 }
                 
-                // 计算并发送速度指令（方向取反）
-                float motor_speed = (yaw_error > 0) ? -MOTOR_FIXED_SPEED : MOTOR_FIXED_SPEED;
-                motor_control_set_velocity(g_motor_controller, motor_speed);
-                
-                motor_should_run = true;
+                // 重置检测计时器
+                yaw_check_start_time = current_time;
+                yaw_at_check_start = current_yaw;
             } else if (current_time - out_of_tolerance_start_time >= enable_delay) {
                 // 延时500ms后，发送使能指令并设置速度
                 if (!motor_control_is_enabled(g_motor_controller)) {
@@ -224,11 +239,37 @@ static void balance_control_task(void *pvParameters) {
             }
         }
         
-        // 3. 定期发送速度指令 (10ms频率)
-        if (motor_should_run && (xTaskGetTickCount() - xLastVelocityTime >= xVelocityFrequency)) {
-            float motor_speed = (yaw_error > 0) ? -MOTOR_FIXED_SPEED : MOTOR_FIXED_SPEED;
-            motor_control_set_velocity(g_motor_controller, motor_speed);
-            xLastVelocityTime = xTaskGetTickCount();
+        // 3. 定期发送速度指令
+        TickType_t now = xTaskGetTickCount();
+        
+        // 检查是否在重启后500ms内需要高频发送
+        bool in_restart_period = (now - last_motor_restart_time <= restart_velocity_period);
+        
+        if (motor_should_run) {
+            if (in_restart_period) {
+                // 重启后500ms内，以10ms频率发送
+                if (now - last_restart_velocity_time >= restart_velocity_freq) {
+                    float motor_speed = (yaw_error > 0) ? -MOTOR_FIXED_SPEED : MOTOR_FIXED_SPEED;
+                    motor_control_set_velocity(g_motor_controller, motor_speed);
+                    last_restart_velocity_time = now;
+                    printf("[重启期] 高频发送速度指令: %.1f\n", motor_speed);
+                }
+            } else {
+                // 正常情况下，以10ms频率发送
+                if (now - xLastVelocityTime >= xVelocityFrequency) {
+                    float motor_speed = (yaw_error > 0) ? -MOTOR_FIXED_SPEED : MOTOR_FIXED_SPEED;
+                    motor_control_set_velocity(g_motor_controller, motor_speed);
+                    xLastVelocityTime = now;
+                }
+            }
+        }
+        
+        // 4. 定期发送清理错误指令
+        static TickType_t xLastClearErrorTime = 0;
+        const TickType_t xClearErrorFrequency = pdMS_TO_TICKS(3000); // 发送一次清理指令
+        if (xTaskGetTickCount() - xLastClearErrorTime >= xClearErrorFrequency) {
+            motor_control_clear_errors(g_motor_controller);
+            xLastClearErrorTime = xTaskGetTickCount();
         }
         
     }
