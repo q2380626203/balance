@@ -6,20 +6,11 @@
 #include "freertos/semphr.h"
 #include "driver/gpio.h"
 #include "driver/uart.h"
-#include "gy25t.h"
 #include "motor_control.h"
-
-// --- 陀螺仪频率配置 ---
-// 注意：这需要GY-25T模块支持频率切换指令
-#define GYRO_TARGET_FREQ_200HZ
 
 // =====================================================================================
 // --- 硬件与软件配置区 (Hardware & Software Configuration) ---
 // =====================================================================================
-
-#define GYRO_UART_PORT      UART_NUM_1
-#define GYRO_UART_TXD       GPIO_NUM_11
-#define GYRO_UART_RXD       GPIO_NUM_10
 
 #define MOTOR_UART_PORT     UART_NUM_2
 #define MOTOR_UART_TXD      GPIO_NUM_13
@@ -33,8 +24,10 @@ const float YAW_TOLERANCE = 3.0f;       // yaw角度容差 (±5度)
 const float MOTOR_FIXED_SPEED = 15.0f;    // 电机固定转动速度
 
 // --- 全局模块句柄 (Global Module Handles) ---
-static gy25t_handle_t* g_gyro_handle = NULL;
 static motor_controller_t* g_motor_controller = NULL;
+
+// 临时：替代陀螺仪数据的全局变量
+float g_last_yaw = 0.0f;
 
 // =====================================================================================
 // --- 实时显示任务 (Real-time Display Task) ---
@@ -52,7 +45,7 @@ static void realtime_display_task(void *pvParameters) {
     while (1) {
         vTaskDelayUntil(&last_wake_time, refresh_rate);
         
-        // 获取当前数据
+        // 获取当前数据 (临时：无陀螺仪数据)
         float current_yaw = g_last_yaw;
         
         // 清屏并显示固定界面
@@ -143,7 +136,7 @@ static void balance_control_task(void *pvParameters) {
     while (1) {
         vTaskDelayUntil(&xLastWakeTime, safeFrequency); // 固定频率运行 (200Hz)
 
-        // 1. 数据更新：直接读取全局YAW变量
+        // 1. 数据更新：临时使用固定值，等待新陀螺仪模块
         current_yaw = g_last_yaw;
 
         // 初始化检测起始点（如果还未初始化）
@@ -284,20 +277,8 @@ extern "C" void app_main(void) {
     vTaskDelay(pdMS_TO_TICKS(5000)); // 通电后等待5秒
     printf("--- 简化Yaw角度平衡控制系统 ---\n"); 
     
-    // 初始化GY-25T陀螺仪模块
-    gy25t_config_t gyro_config = {
-        .uart_port = GYRO_UART_PORT,
-        .txd_pin = GYRO_UART_TXD,
-        .rxd_pin = GYRO_UART_RXD,
-        .baud_rate = 115200,
-        .buf_size = UART_BUF_SIZE
-    };
-    
-    g_gyro_handle = gy25t_init(&gyro_config);
-    if (!g_gyro_handle) {
-        printf("[错误] GY-25T 陀螺仪模块初始化失败！\n");
-        return;
-    }
+    // TODO: 初始化新的陀螺仪模块
+    printf("[信息] 等待新陀螺仪模块接入...\n");
 
 
     // 初始化电机控制模块
@@ -312,7 +293,7 @@ extern "C" void app_main(void) {
     g_motor_controller = motor_control_init(&motor_driver_config, MOTOR_FIXED_SPEED);
     if (!g_motor_controller) {
         printf("[错误] 电机控制模块初始化失败！\n");
-        gy25t_deinit(g_gyro_handle);
+        // TODO: 清理新陀螺仪模块资源
         return;
     }
 
