@@ -1,4 +1,4 @@
-idf_component_register(SRCS "main.cpp" "motor_control.cpp" "ky9250.c"
+idf_component_register(SRCS "main.cpp" "motor_control.cpp" "jy901s.c"
                     INCLUDE_DIRS "."
                     # 关键修正：添加主程序所依赖的所有 ESP-IDF 元件
                     # driver: 提供 uart.h 等硬件驱动
