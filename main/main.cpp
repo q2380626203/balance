@@ -1,246 +1,194 @@
 #include <stdio.h>
 #include <string.h>
-#include <math.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "freertos/semphr.h"
-#include "driver/gpio.h"
-#include "driver/uart.h"
 #include "esp_task_wdt.h"
+#include "esp_log.h"
+
+// 模块化系统组件
+#include "shared_data.h"
+#include "wifi_ap.h"
+#include "web_server.h"
+#include "balance_controller.h"
 #include "motor_control.h"
 #include "ble_imu.h"
 
+static const char* TAG = "MainSystem";
+
 // =====================================================================================
-// --- 硬件与软件配置区 (Hardware & Software Configuration) ---
+// --- 硬件配置常量 ---
 // =====================================================================================
 
 #define MOTOR_UART_PORT     UART_NUM_2
 #define MOTOR_UART_TXD      GPIO_NUM_13
 #define MOTOR_UART_RXD      GPIO_NUM_12
-
 #define UART_BUF_SIZE       (1024)
 
-// BLE IMU 目标设备地址: e8:cb:ed:5a:52:8e (不需要GPIO配置)
-
-// --- Pitch角度平衡控制参数 ---
-const float TARGET_PITCH_ANGLE = 0.0f;    // 目标pitch角度 (度) - 平衡位置
-const float PITCH_TOLERANCE = 10.0f;       // pitch角度容差 (±3度)
-const float MOTOR_FIXED_SPEED = 30.0f;    // 电机固定转动速度
-
-// --- 全局模块句柄 (Global Module Handles) ---
-static motor_controller_t* g_motor_controller = NULL;
-static ble_imu_handle_t* g_ble_imu_handle = NULL;
-
-
 // =====================================================================================
-// --- 实时显示任务 (Real-time Display Task) ---
+// --- 系统模块句柄 ---
 // =====================================================================================
 
-// 固定显示的实时数据任务 (减少打印频率避免看门狗超时)
-static void realtime_display_task(void *pvParameters) {
-    const TickType_t refresh_rate = pdMS_TO_TICKS(500); // 2Hz刷新频率，避免看门狗超时
-    TickType_t last_wake_time = xTaskGetTickCount();
-    
-    while (1) {
-        vTaskDelayUntil(&last_wake_time, refresh_rate);
-        
-        // 获取BLE IMU数据
-        ble_imu_data_t sensor_data;
-        bool data_valid = ble_imu_get_data(g_ble_imu_handle, &sensor_data);
-        
-        printf("\033[2J\033[H"); // 注释掉清屏，减少打印时间
-        printf("=== ESP32 BLE IMU 平衡控制系统 ===\n");
-        printf("BLE: 接收%lu字节 | 连接状态: %s\n", 
-               ble_imu_get_bytes_received(g_ble_imu_handle),
-               ble_imu_is_connected(g_ble_imu_handle) ? "已连接" : "未连接");
-        
-        if (data_valid) {
-            // 显示姿态数据，重点关注Pitch角
-            printf("Roll: %6.2f°  **PITCH: %6.2f°**  Yaw: %6.2f°\n",
-                   sensor_data.roll, sensor_data.pitch, sensor_data.yaw);
-            printf("时间戳: %lu | 包#%lu\n",
-                   sensor_data.timestamp, sensor_data.packet_count);
-            
-            printf("平衡控制: PITCH=%.2f° (目标%.1f°±%.1f°)\n", 
-                   sensor_data.pitch, TARGET_PITCH_ANGLE, PITCH_TOLERANCE);
-        } else {
-            printf("等待BLE IMU数据... (检查BLE连接状态)\n");
-        }
-        
-        fflush(stdout);
-    }
+typedef struct {
+    shared_data_t* shared_data;
+    wifi_ap_handle_t* wifi_ap;
+    web_server_handle_t* web_server;
+    balance_controller_handle_t* balance_controller;
+    motor_controller_t* motor_controller;
+    ble_imu_handle_t* ble_imu_handle;
+} system_modules_t;
+
+static system_modules_t g_system = {
+    .shared_data = NULL,
+    .wifi_ap = NULL,
+    .web_server = NULL,
+    .balance_controller = NULL,
+    .motor_controller = NULL,
+    .ble_imu_handle = NULL
+};
+
+// =====================================================================================
+// --- WiFi事件回调 ---
+// =====================================================================================
+
+static void wifi_event_callback(wifi_ap_state_t state, uint8_t connected_clients) {
+    ESP_LOGI(TAG, "WiFi AP状态: %d, 连接客户端数: %d", state, connected_clients);
 }
 
-
 // =====================================================================================
-// --- 平衡控制任务 (Balance Control Task) ---
+// --- 系统初始化函数 ---
 // =====================================================================================
 
-
-// 基于Pitch角度的平衡控制任务
-static void balance_control_task(void *pvParameters) {
-    // 控制周期设置
-    const TickType_t xFrequency = pdMS_TO_TICKS(5); // 5ms, 200Hz
-    const TickType_t safeFrequency = (xFrequency > 0) ? xFrequency : 1;
-    TickType_t xLastWakeTime = xTaskGetTickCount();
-
-    // 控制状态变量
-    float current_pitch = 0.0f;
-    float pitch_error = 0.0f;
-    bool motor_should_run = false;
-    bool last_in_tolerance = true;  // 上一次是否在容差区内
-    TickType_t out_of_tolerance_start_time = 0;  // 离开容差区的时间
-    const TickType_t enable_delay = pdMS_TO_TICKS(500);  // 500ms延时 - 恢复你的原始参数
-    
-    // PITCH角变化检测变量
-    float pitch_at_check_start = 0.0f;  // 开始检测时的pitch值
-    TickType_t pitch_check_start_time = 0;  // 开始检测的时间
-    TickType_t last_motor_restart_time = 0;  // 上次电机重启的时间
-    TickType_t last_restart_velocity_time = 0;  // 重启后速度指令发送时间
-    const float pitch_significant_change = 1.0f;  // pitch角显著变化阈值 (1度)
-    const TickType_t pitch_check_timeout = pdMS_TO_TICKS(500);  // 500ms检查超时
-    const TickType_t motor_restart_cooldown = pdMS_TO_TICKS(1500);  // 1.5s电机重启冷却时间 - 恢复你的原始参数
-    const TickType_t restart_velocity_period = pdMS_TO_TICKS(500);  // 重启后500ms高频发送期 - 恢复你的原始参数
-    const TickType_t restart_velocity_freq = pdMS_TO_TICKS(10);  // 重启后10ms发送频率 - 恢复你的原始参数
-    
-    // 速度指令发送计时器
-    TickType_t xLastVelocityTime = xTaskGetTickCount();
-    const TickType_t xVelocityFrequency = pdMS_TO_TICKS(10); // 10ms发送一次速度指令
-
-    while (1) {
-        vTaskDelayUntil(&xLastWakeTime, safeFrequency); // 固定频率运行 (200Hz)
-
-        // 1. 数据更新：通过BLE IMU模块获取pitch角度
-        current_pitch = ble_imu_get_pitch(g_ble_imu_handle);
-
-        // 初始化检测起始点（如果还未初始化）
-        if (pitch_check_start_time == 0) {
-            pitch_check_start_time = xTaskGetTickCount();
-            pitch_at_check_start = current_pitch;
-        }
-
-        // 2. 控制逻辑：基于最新的PITCH角数据执行
-        pitch_error = current_pitch - TARGET_PITCH_ANGLE;
-        bool in_tolerance = (fabs(pitch_error) <= PITCH_TOLERANCE);
-        
-        if (in_tolerance) {
-            // 在容差区内：设置速度为0（保持使能状态）
-            // if (motor_control_is_enabled(g_motor_controller)) {
-            //     // 连续发送三次失能指令确保发出
-            //     for (int i = 0; i < 3; i++) {
-            //         motor_control_enable(g_motor_controller, false);
-            //         vTaskDelay(pdMS_TO_TICKS(10)); // 延时10ms
-            //     }
-            //     motor_control_set_velocity(g_motor_controller, 0.0f);
-            // }
-            motor_control_set_velocity(g_motor_controller, 0.0f);
-            motor_should_run = false;
-            last_in_tolerance = true;
-        } else {
-            // 在容差区外
-            if (last_in_tolerance) {
-                // 刚离开容差区，记录时间并重置pitch变化检测
-                out_of_tolerance_start_time = xTaskGetTickCount();
-                pitch_check_start_time = xTaskGetTickCount();
-                pitch_at_check_start = current_pitch;
-                last_in_tolerance = false;
-                printf("[信息] PITCH离开平衡区(%.2f°)，开始计时\n", current_pitch);
-            }
-            
-            TickType_t current_time = xTaskGetTickCount();
-            
-            // 检查在容差外是否超过500ms且pitch角变化不超过1度（同时检查冷却时间）
-            if (current_time - pitch_check_start_time >= pitch_check_timeout && 
-                current_time - last_motor_restart_time >= motor_restart_cooldown) {
-                float pitch_change_amount = fabs(current_pitch - pitch_at_check_start);
-                if (pitch_change_amount <= pitch_significant_change) {
-                    printf("[警告] 平衡外超过500ms且PITCH角变化仅%.2f°(≤1°)，清除电机错误并立即重启\n", pitch_change_amount);
-                    
-                    // 清除电机错误
-                    motor_control_clear_errors(g_motor_controller);
-                    
-                    // 重置状态，重新开始容差外规则
-                    out_of_tolerance_start_time = current_time;
-                    last_motor_restart_time = current_time;  // 记录重启时间
-                    last_restart_velocity_time = current_time;  // 记录重启后速度发送时间
-                    
-                    // 立即使能电机发送速度指令
-                    for (int i = 0; i < 3; i++) {
-                        motor_control_enable(g_motor_controller, true);
-                        vTaskDelay(pdMS_TO_TICKS(10));
-                    }
-                    
-                    // 计算并发送速度指令（pitch正值前倾，需要前进）
-                    float motor_speed = (pitch_error > 0) ? MOTOR_FIXED_SPEED : -MOTOR_FIXED_SPEED;
-                    motor_control_set_velocity(g_motor_controller, motor_speed);
-                    
-                    motor_should_run = true;
-                } else {
-                    printf("[信息] 500ms内PITCH角变化%.2f°(>1°)，重置检测计时器\n", pitch_change_amount);
-                }
-                
-                // 重置检测计时器
-                pitch_check_start_time = current_time;
-                pitch_at_check_start = current_pitch;
-            } else if (current_time - out_of_tolerance_start_time >= enable_delay) {
-                // 延时500ms后，发送使能指令并设置速度
-                if (!motor_control_is_enabled(g_motor_controller)) {
-                    // 连续发送三次使能指令确保发出
-                    for (int i = 0; i < 3; i++) {
-                        motor_control_enable(g_motor_controller, true);
-                        vTaskDelay(pdMS_TO_TICKS(10)); // 延时10ms
-                    }
-                }
-                
-                motor_should_run = true;
-            } else {
-                // 延时期间保持失能状态
-                if (motor_control_is_enabled(g_motor_controller)) {
-                    // 连续发送三次失能指令确保发出
-                    for (int i = 0; i < 3; i++) {
-                        motor_control_enable(g_motor_controller, false);
-                        vTaskDelay(pdMS_TO_TICKS(10)); // 延时10ms
-                    }
-                    motor_control_set_velocity(g_motor_controller, 0.0f);
-                }
-                motor_should_run = false;
-            }
-        }
-        
-        // 3. 定期发送速度指令
-        TickType_t now = xTaskGetTickCount();
-        
-        // 检查是否在重启后500ms内需要高频发送
-        bool in_restart_period = (now - last_motor_restart_time <= restart_velocity_period);
-        
-        if (motor_should_run) {
-            if (in_restart_period) {
-                // 重启后500ms内，以10ms频率发送
-                if (now - last_restart_velocity_time >= restart_velocity_freq) {
-                    float motor_speed = (pitch_error > 0) ? MOTOR_FIXED_SPEED : -MOTOR_FIXED_SPEED;
-                    motor_control_set_velocity(g_motor_controller, motor_speed);
-                    last_restart_velocity_time = now;
-                    printf("[重启期] 高频发送速度指令: %.1f\n", motor_speed);
-                }
-            } else {
-                // 正常情况下，以10ms频率发送
-                if (now - xLastVelocityTime >= xVelocityFrequency) {
-                    float motor_speed = (pitch_error > 0) ? MOTOR_FIXED_SPEED : -MOTOR_FIXED_SPEED;
-                    motor_control_set_velocity(g_motor_controller, motor_speed);
-                    xLastVelocityTime = now;
-                }
-            }
-        }
-        
-        // 4. 定期发送清理错误指令
-        static TickType_t xLastClearErrorTime = 0;
-        const TickType_t xClearErrorFrequency = pdMS_TO_TICKS(3000); // 3s发送一次清理指令 - 恢复你的原始参数
-        if (xTaskGetTickCount() - xLastClearErrorTime >= xClearErrorFrequency) {
-            motor_control_clear_errors(g_motor_controller);
-            xLastClearErrorTime = xTaskGetTickCount();
-        }
-        
+static bool system_init_shared_data(void) {
+    g_system.shared_data = shared_data_init();
+    if (!g_system.shared_data) {
+        ESP_LOGE(TAG, "共享数据初始化失败");
+        return false;
     }
+    ESP_LOGI(TAG, "✓ 共享数据模块初始化成功");
+    return true;
+}
+
+static bool system_init_ble_imu(void) {
+    g_system.ble_imu_handle = ble_imu_init();
+    if (!g_system.ble_imu_handle) {
+        ESP_LOGE(TAG, "BLE IMU初始化失败");
+        return false;
+    }
+    
+    // 将BLE IMU句柄注册到共享数据
+    shared_data_set_ble_imu_handle(g_system.shared_data, g_system.ble_imu_handle);
+    ESP_LOGI(TAG, "✓ BLE IMU模块初始化成功");
+    return true;
+}
+
+static bool system_init_motor_controller(void) {
+    motor_driver_config_t motor_config = {
+        .uart_port = MOTOR_UART_PORT,
+        .txd_pin = MOTOR_UART_TXD,
+        .rxd_pin = MOTOR_UART_RXD,
+        .baud_rate = 115200,
+        .buf_size = UART_BUF_SIZE
+    };
+    
+    balance_config_t config;
+    shared_data_get_config(g_system.shared_data, &config);
+    
+    g_system.motor_controller = motor_control_init(&motor_config, config.motor_fixed_speed);
+    if (!g_system.motor_controller) {
+        ESP_LOGE(TAG, "电机控制器初始化失败");
+        return false;
+    }
+    
+    // 将电机控制器句柄注册到共享数据
+    shared_data_set_motor_controller(g_system.shared_data, g_system.motor_controller);
+    ESP_LOGI(TAG, "✓ 电机控制器模块初始化成功");
+    return true;
+}
+
+static bool system_init_wifi_ap(void) {
+    g_system.wifi_ap = wifi_ap_init(wifi_event_callback);
+    if (!g_system.wifi_ap) {
+        ESP_LOGE(TAG, "WiFi AP初始化失败");
+        return false;
+    }
+    
+    if (!wifi_ap_start(g_system.wifi_ap)) {
+        ESP_LOGE(TAG, "WiFi AP启动失败");
+        return false;
+    }
+    
+    ESP_LOGI(TAG, "✓ WiFi AP模块初始化并启动成功");
+    return true;
+}
+
+static bool system_init_web_server(void) {
+    g_system.web_server = web_server_init(g_system.shared_data);
+    if (!g_system.web_server) {
+        ESP_LOGE(TAG, "Web服务器初始化失败");
+        return false;
+    }
+    
+    if (!web_server_start(g_system.web_server)) {
+        ESP_LOGE(TAG, "Web服务器启动失败");
+        return false;
+    }
+    
+    ESP_LOGI(TAG, "✓ Web服务器模块初始化并启动成功");
+    return true;
+}
+
+static bool system_init_balance_controller(void) {
+    g_system.balance_controller = balance_controller_init(g_system.shared_data);
+    if (!g_system.balance_controller) {
+        ESP_LOGE(TAG, "平衡控制器初始化失败");
+        return false;
+    }
+    
+    if (!balance_controller_start(g_system.balance_controller)) {
+        ESP_LOGE(TAG, "平衡控制器启动失败");
+        return false;
+    }
+    
+    ESP_LOGI(TAG, "✓ 平衡控制器模块初始化并启动成功");
+    return true;
+}
+
+// =====================================================================================
+// --- 系统销毁函数 ---
+// =====================================================================================
+
+static void system_destroy(void) {
+    if (g_system.balance_controller) {
+        balance_controller_destroy(g_system.balance_controller);
+        g_system.balance_controller = NULL;
+    }
+    
+    if (g_system.web_server) {
+        web_server_destroy(g_system.web_server);
+        g_system.web_server = NULL;
+    }
+    
+    if (g_system.wifi_ap) {
+        wifi_ap_destroy(g_system.wifi_ap);
+        g_system.wifi_ap = NULL;
+    }
+    
+    if (g_system.motor_controller) {
+        motor_control_deinit(g_system.motor_controller);
+        g_system.motor_controller = NULL;
+    }
+    
+    if (g_system.ble_imu_handle) {
+        ble_imu_destroy(g_system.ble_imu_handle);
+        g_system.ble_imu_handle = NULL;
+    }
+    
+    if (g_system.shared_data) {
+        shared_data_destroy(g_system.shared_data);
+        g_system.shared_data = NULL;
+    }
+    
+    ESP_LOGI(TAG, "系统模块全部销毁完成");
 }
 
 // =====================================================================================
@@ -251,47 +199,62 @@ extern "C" void app_main(void) {
     // 禁用看门狗
     esp_task_wdt_deinit();
     
-    printf("--- 系统将在5秒后启动，请保持设备静止 ---\n");
-    vTaskDelay(pdMS_TO_TICKS(5000)); // 通电后等待5秒
-    printf("--- ESP32 BLE IMU 平衡控制系统 ---\n"); 
+    ESP_LOGI(TAG, "🚀 ESP32 平衡车双协议通信系统启动中...");
+    ESP_LOGI(TAG, "--- 系统将在5秒后启动，请保持设备静止 ---");
+    vTaskDelay(pdMS_TO_TICKS(5000));
     
-    // 初始化BLE IMU模块
-    printf("[信息] 初始化BLE IMU模块...\n");
-    g_ble_imu_handle = ble_imu_init();
-    if (!g_ble_imu_handle) {
-        printf("[错误] BLE IMU模块初始化失败！\n");
-        return;
-    }
-    printf("[成功] BLE IMU模块初始化成功\n");
-
-
-    // 初始化电机控制模块
-    motor_driver_config_t motor_driver_config = {
-        .uart_port = MOTOR_UART_PORT,
-        .txd_pin = MOTOR_UART_TXD,
-        .rxd_pin = MOTOR_UART_RXD,
-        .baud_rate = 115200,
-        .buf_size = UART_BUF_SIZE
-    };
+    ESP_LOGI(TAG, "========== 模块化系统初始化开始 ==========");
     
-    g_motor_controller = motor_control_init(&motor_driver_config, MOTOR_FIXED_SPEED);
-    if (!g_motor_controller) {
-        printf("[错误] 电机控制模块初始化失败！\n");
-        ble_imu_destroy(g_ble_imu_handle);
-        return;
+    // 按依赖顺序初始化所有模块
+    if (!system_init_shared_data()) {
+        ESP_LOGE(TAG, "❌ 系统初始化失败：共享数据模块");
+        goto cleanup;
     }
-
-
-    // 创建实时显示任务
-    xTaskCreate(realtime_display_task, "realtime_display", 4096, NULL, 3, NULL);
-
-    // 创建集成平衡控制任务
-    xTaskCreate(balance_control_task, "balance_control_task", 4096, NULL, 5, NULL);
-
-    printf("[信息] BLE IMU平衡系统初始化完成，所有任务已启动\n");
-    printf("[信息] 功能说明:\n");
-    printf("  - BLE IMU传感器: 通过蓝牙连接远程IMU设备，实时姿态数据采集\n");
-    printf("  - 平衡控制: 当PITCH角度超出%.1f°±%.1f°时，电机以%.1f速度调节\n", TARGET_PITCH_ANGLE, PITCH_TOLERANCE, MOTOR_FIXED_SPEED);
-    printf("  - 数据显示: 2Hz实时传感器数据，重点关注PITCH角\n");
-    printf("  - 目标设备: e8:cb:ed:5a:52:8e\n");
+    
+    if (!system_init_ble_imu()) {
+        ESP_LOGE(TAG, "❌ 系统初始化失败：BLE IMU模块");
+        goto cleanup;
+    }
+    
+    if (!system_init_motor_controller()) {
+        ESP_LOGE(TAG, "❌ 系统初始化失败：电机控制器模块");
+        goto cleanup;
+    }
+    
+    if (!system_init_wifi_ap()) {
+        ESP_LOGE(TAG, "❌ 系统初始化失败：WiFi AP模块");
+        goto cleanup;
+    }
+    
+    if (!system_init_web_server()) {
+        ESP_LOGE(TAG, "❌ 系统初始化失败：Web服务器模块");
+        goto cleanup;
+    }
+    
+    if (!system_init_balance_controller()) {
+        ESP_LOGE(TAG, "❌ 系统初始化失败：平衡控制器模块");
+        goto cleanup;
+    }
+    
+    ESP_LOGI(TAG, "========== 系统初始化完成 ==========");
+    ESP_LOGI(TAG, "🎯 系统功能:");
+    ESP_LOGI(TAG, "  📡 BLE IMU: 实时姿态数据采集 (e8:cb:ed:5a:52:8e)");
+    ESP_LOGI(TAG, "  ⚖️  平衡控制: 基于PITCH角度自动调节");
+    ESP_LOGI(TAG, "  📶 WiFi AP: %s (密码: %s)", "ESP32_Balance_Config", "balance123");
+    ESP_LOGI(TAG, "  🌐 Web界面: http://192.168.4.1");
+    ESP_LOGI(TAG, "  📊 实时监控: 串口输出 + Web界面");
+    
+    ESP_LOGI(TAG, "✅ 系统运行中，所有模块协调工作");
+    
+    // 主循环：监控系统状态
+    while (true) {
+        vTaskDelay(pdMS_TO_TICKS(10000)); // 每10秒检查一次
+        
+        // 可以在这里添加系统健康检查逻辑
+        // 例如：检查各模块状态，记录运行统计等
+    }
+    
+cleanup:
+    ESP_LOGE(TAG, "系统初始化失败，开始清理资源...");
+    system_destroy();
 }
