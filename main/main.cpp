@@ -8,7 +8,7 @@
 #include "driver/uart.h"
 #include "esp_task_wdt.h"
 #include "motor_control.h"
-#include "jy901s.h"
+#include "ble_imu.h"
 
 // =====================================================================================
 // --- 硬件与软件配置区 (Hardware & Software Configuration) ---
@@ -18,20 +18,18 @@
 #define MOTOR_UART_TXD      GPIO_NUM_13
 #define MOTOR_UART_RXD      GPIO_NUM_12
 
-#define JY901S_UART_PORT    UART_NUM_1
-#define JY901S_UART_RXD     GPIO_NUM_11
-#define JY901S_UART_TXD     GPIO_NUM_10
-
 #define UART_BUF_SIZE       (1024)
 
-// --- Roll角度平衡控制参数 ---
-const float TARGET_ROLL_ANGLE = 0.0f;    // 目标roll角度 (度) - 平衡位置
-const float ROLL_TOLERANCE = 3.0f;       // roll角度容差 (±3度) - 恢复你的原始参数
-const float MOTOR_FIXED_SPEED = 15.0f;    // 电机固定转动速度 - 恢复你的原始参数
+// BLE IMU 目标设备地址: e8:cb:ed:5a:52:8e (不需要GPIO配置)
+
+// --- Pitch角度平衡控制参数 ---
+const float TARGET_PITCH_ANGLE = 0.0f;    // 目标pitch角度 (度) - 平衡位置
+const float PITCH_TOLERANCE = 10.0f;       // pitch角度容差 (±3度)
+const float MOTOR_FIXED_SPEED = 30.0f;    // 电机固定转动速度
 
 // --- 全局模块句柄 (Global Module Handles) ---
 static motor_controller_t* g_motor_controller = NULL;
-static jy901s_handle_t* g_jy901s_handle = NULL;
+static ble_imu_handle_t* g_ble_imu_handle = NULL;
 
 
 // =====================================================================================
@@ -46,25 +44,27 @@ static void realtime_display_task(void *pvParameters) {
     while (1) {
         vTaskDelayUntil(&last_wake_time, refresh_rate);
         
-        // 获取JY901S数据
-        jy901s_data_t sensor_data;
-        bool data_valid = jy901s_get_data(g_jy901s_handle, &sensor_data);
+        // 获取BLE IMU数据
+        ble_imu_data_t sensor_data;
+        bool data_valid = ble_imu_get_data(g_ble_imu_handle, &sensor_data);
         
         printf("\033[2J\033[H"); // 注释掉清屏，减少打印时间
-        printf("=== ESP32 JY901S 平衡控制系统 ===\n");
-        printf("UART1: 接收%lu字节\n", jy901s_get_bytes_received(g_jy901s_handle));
+        printf("=== ESP32 BLE IMU 平衡控制系统 ===\n");
+        printf("BLE: 接收%lu字节 | 连接状态: %s\n", 
+               ble_imu_get_bytes_received(g_ble_imu_handle),
+               ble_imu_is_connected(g_ble_imu_handle) ? "已连接" : "未连接");
         
         if (data_valid) {
-            // 显示姿态数据，重点关注Roll角
-            printf("**ROLL: %6.2f°**  Pitch: %6.2f°  Yaw: %6.2f°\n",
+            // 显示姿态数据，重点关注Pitch角
+            printf("Roll: %6.2f°  **PITCH: %6.2f°**  Yaw: %6.2f°\n",
                    sensor_data.roll, sensor_data.pitch, sensor_data.yaw);
-            printf("版本号: %u | 包#%lu\n",
-                   sensor_data.version, sensor_data.packet_count);
+            printf("时间戳: %lu | 包#%lu\n",
+                   sensor_data.timestamp, sensor_data.packet_count);
             
-            printf("平衡控制: ROLL=%.2f° (目标%.1f°±%.1f°)\n", 
-                   sensor_data.roll, TARGET_ROLL_ANGLE, ROLL_TOLERANCE);
+            printf("平衡控制: PITCH=%.2f° (目标%.1f°±%.1f°)\n", 
+                   sensor_data.pitch, TARGET_PITCH_ANGLE, PITCH_TOLERANCE);
         } else {
-            printf("等待JY901S数据... (检查UART1连接)\n");
+            printf("等待BLE IMU数据... (检查BLE连接状态)\n");
         }
         
         fflush(stdout);
@@ -77,7 +77,7 @@ static void realtime_display_task(void *pvParameters) {
 // =====================================================================================
 
 
-// 基于Roll角度的平衡控制任务
+// 基于Pitch角度的平衡控制任务
 static void balance_control_task(void *pvParameters) {
     // 控制周期设置
     const TickType_t xFrequency = pdMS_TO_TICKS(5); // 5ms, 200Hz
@@ -85,20 +85,20 @@ static void balance_control_task(void *pvParameters) {
     TickType_t xLastWakeTime = xTaskGetTickCount();
 
     // 控制状态变量
-    float current_roll = 0.0f;
-    float roll_error = 0.0f;
+    float current_pitch = 0.0f;
+    float pitch_error = 0.0f;
     bool motor_should_run = false;
     bool last_in_tolerance = true;  // 上一次是否在容差区内
     TickType_t out_of_tolerance_start_time = 0;  // 离开容差区的时间
     const TickType_t enable_delay = pdMS_TO_TICKS(500);  // 500ms延时 - 恢复你的原始参数
     
-    // ROLL角变化检测变量
-    float roll_at_check_start = 0.0f;  // 开始检测时的roll值
-    TickType_t roll_check_start_time = 0;  // 开始检测的时间
+    // PITCH角变化检测变量
+    float pitch_at_check_start = 0.0f;  // 开始检测时的pitch值
+    TickType_t pitch_check_start_time = 0;  // 开始检测的时间
     TickType_t last_motor_restart_time = 0;  // 上次电机重启的时间
     TickType_t last_restart_velocity_time = 0;  // 重启后速度指令发送时间
-    const float roll_significant_change = 1.0f;  // roll角显著变化阈值 (1度) - 恢复你的原始参数
-    const TickType_t roll_check_timeout = pdMS_TO_TICKS(500);  // 500ms检查超时 - 恢复你的原始参数
+    const float pitch_significant_change = 1.0f;  // pitch角显著变化阈值 (1度)
+    const TickType_t pitch_check_timeout = pdMS_TO_TICKS(500);  // 500ms检查超时
     const TickType_t motor_restart_cooldown = pdMS_TO_TICKS(1500);  // 1.5s电机重启冷却时间 - 恢复你的原始参数
     const TickType_t restart_velocity_period = pdMS_TO_TICKS(500);  // 重启后500ms高频发送期 - 恢复你的原始参数
     const TickType_t restart_velocity_freq = pdMS_TO_TICKS(10);  // 重启后10ms发送频率 - 恢复你的原始参数
@@ -110,50 +110,51 @@ static void balance_control_task(void *pvParameters) {
     while (1) {
         vTaskDelayUntil(&xLastWakeTime, safeFrequency); // 固定频率运行 (200Hz)
 
-        // 1. 数据更新：通过JY901S模块获取roll角度
-        current_roll = jy901s_get_roll(g_jy901s_handle);
+        // 1. 数据更新：通过BLE IMU模块获取pitch角度
+        current_pitch = ble_imu_get_pitch(g_ble_imu_handle);
 
         // 初始化检测起始点（如果还未初始化）
-        if (roll_check_start_time == 0) {
-            roll_check_start_time = xTaskGetTickCount();
-            roll_at_check_start = current_roll;
+        if (pitch_check_start_time == 0) {
+            pitch_check_start_time = xTaskGetTickCount();
+            pitch_at_check_start = current_pitch;
         }
 
-        // 2. 控制逻辑：基于最新的ROLL角数据执行
-        roll_error = current_roll - TARGET_ROLL_ANGLE;
-        bool in_tolerance = (fabs(roll_error) <= ROLL_TOLERANCE);
+        // 2. 控制逻辑：基于最新的PITCH角数据执行
+        pitch_error = current_pitch - TARGET_PITCH_ANGLE;
+        bool in_tolerance = (fabs(pitch_error) <= PITCH_TOLERANCE);
         
         if (in_tolerance) {
-            // 在容差区内：立即失能并设置速度为0
-            if (motor_control_is_enabled(g_motor_controller)) {
-                // 连续发送三次失能指令确保发出
-                for (int i = 0; i < 3; i++) {
-                    motor_control_enable(g_motor_controller, false);
-                    vTaskDelay(pdMS_TO_TICKS(10)); // 延时10ms
-                }
-                motor_control_set_velocity(g_motor_controller, 0.0f);
-            }
+            // 在容差区内：设置速度为0（保持使能状态）
+            // if (motor_control_is_enabled(g_motor_controller)) {
+            //     // 连续发送三次失能指令确保发出
+            //     for (int i = 0; i < 3; i++) {
+            //         motor_control_enable(g_motor_controller, false);
+            //         vTaskDelay(pdMS_TO_TICKS(10)); // 延时10ms
+            //     }
+            //     motor_control_set_velocity(g_motor_controller, 0.0f);
+            // }
+            motor_control_set_velocity(g_motor_controller, 0.0f);
             motor_should_run = false;
             last_in_tolerance = true;
         } else {
             // 在容差区外
             if (last_in_tolerance) {
-                // 刚离开容差区，记录时间并重置roll变化检测
+                // 刚离开容差区，记录时间并重置pitch变化检测
                 out_of_tolerance_start_time = xTaskGetTickCount();
-                roll_check_start_time = xTaskGetTickCount();
-                roll_at_check_start = current_roll;
+                pitch_check_start_time = xTaskGetTickCount();
+                pitch_at_check_start = current_pitch;
                 last_in_tolerance = false;
-                printf("[信息] ROLL离开平衡区(%.2f°)，开始计时\n", current_roll);
+                printf("[信息] PITCH离开平衡区(%.2f°)，开始计时\n", current_pitch);
             }
             
             TickType_t current_time = xTaskGetTickCount();
             
-            // 检查在容差外是否超过500ms且roll角变化不超过1度（同时检查冷却时间）
-            if (current_time - roll_check_start_time >= roll_check_timeout && 
+            // 检查在容差外是否超过500ms且pitch角变化不超过1度（同时检查冷却时间）
+            if (current_time - pitch_check_start_time >= pitch_check_timeout && 
                 current_time - last_motor_restart_time >= motor_restart_cooldown) {
-                float roll_change_amount = fabs(current_roll - roll_at_check_start);
-                if (roll_change_amount <= roll_significant_change) {
-                    printf("[警告] 平衡外超过500ms且ROLL角变化仅%.2f°(≤1°)，清除电机错误并立即重启\n", roll_change_amount);
+                float pitch_change_amount = fabs(current_pitch - pitch_at_check_start);
+                if (pitch_change_amount <= pitch_significant_change) {
+                    printf("[警告] 平衡外超过500ms且PITCH角变化仅%.2f°(≤1°)，清除电机错误并立即重启\n", pitch_change_amount);
                     
                     // 清除电机错误
                     motor_control_clear_errors(g_motor_controller);
@@ -169,18 +170,18 @@ static void balance_control_task(void *pvParameters) {
                         vTaskDelay(pdMS_TO_TICKS(10));
                     }
                     
-                    // 计算并发送速度指令（roll正值右倾，需要右转）
-                    float motor_speed = (roll_error > 0) ? MOTOR_FIXED_SPEED : -MOTOR_FIXED_SPEED;
+                    // 计算并发送速度指令（pitch正值前倾，需要前进）
+                    float motor_speed = (pitch_error > 0) ? MOTOR_FIXED_SPEED : -MOTOR_FIXED_SPEED;
                     motor_control_set_velocity(g_motor_controller, motor_speed);
                     
                     motor_should_run = true;
                 } else {
-                    printf("[信息] 500ms内ROLL角变化%.2f°(>1°)，重置检测计时器\n", roll_change_amount);
+                    printf("[信息] 500ms内PITCH角变化%.2f°(>1°)，重置检测计时器\n", pitch_change_amount);
                 }
                 
                 // 重置检测计时器
-                roll_check_start_time = current_time;
-                roll_at_check_start = current_roll;
+                pitch_check_start_time = current_time;
+                pitch_at_check_start = current_pitch;
             } else if (current_time - out_of_tolerance_start_time >= enable_delay) {
                 // 延时500ms后，发送使能指令并设置速度
                 if (!motor_control_is_enabled(g_motor_controller)) {
@@ -216,7 +217,7 @@ static void balance_control_task(void *pvParameters) {
             if (in_restart_period) {
                 // 重启后500ms内，以10ms频率发送
                 if (now - last_restart_velocity_time >= restart_velocity_freq) {
-                    float motor_speed = (roll_error > 0) ? MOTOR_FIXED_SPEED : -MOTOR_FIXED_SPEED;
+                    float motor_speed = (pitch_error > 0) ? MOTOR_FIXED_SPEED : -MOTOR_FIXED_SPEED;
                     motor_control_set_velocity(g_motor_controller, motor_speed);
                     last_restart_velocity_time = now;
                     printf("[重启期] 高频发送速度指令: %.1f\n", motor_speed);
@@ -224,7 +225,7 @@ static void balance_control_task(void *pvParameters) {
             } else {
                 // 正常情况下，以10ms频率发送
                 if (now - xLastVelocityTime >= xVelocityFrequency) {
-                    float motor_speed = (roll_error > 0) ? MOTOR_FIXED_SPEED : -MOTOR_FIXED_SPEED;
+                    float motor_speed = (pitch_error > 0) ? MOTOR_FIXED_SPEED : -MOTOR_FIXED_SPEED;
                     motor_control_set_velocity(g_motor_controller, motor_speed);
                     xLastVelocityTime = now;
                 }
@@ -252,16 +253,16 @@ extern "C" void app_main(void) {
     
     printf("--- 系统将在5秒后启动，请保持设备静止 ---\n");
     vTaskDelay(pdMS_TO_TICKS(5000)); // 通电后等待5秒
-    printf("--- ESP32 JY901S 平衡控制系统 ---\n"); 
+    printf("--- ESP32 BLE IMU 平衡控制系统 ---\n"); 
     
-    // 初始化JY901S模块
-    printf("[信息] 初始化JY901S模块...\n");
-    g_jy901s_handle = jy901s_init(JY901S_UART_PORT, JY901S_UART_RXD, JY901S_UART_TXD, 115200);
-    if (!g_jy901s_handle) {
-        printf("[错误] JY901S模块初始化失败！\n");
+    // 初始化BLE IMU模块
+    printf("[信息] 初始化BLE IMU模块...\n");
+    g_ble_imu_handle = ble_imu_init();
+    if (!g_ble_imu_handle) {
+        printf("[错误] BLE IMU模块初始化失败！\n");
         return;
     }
-    printf("[成功] JY901S模块初始化成功\n");
+    printf("[成功] BLE IMU模块初始化成功\n");
 
 
     // 初始化电机控制模块
@@ -276,7 +277,7 @@ extern "C" void app_main(void) {
     g_motor_controller = motor_control_init(&motor_driver_config, MOTOR_FIXED_SPEED);
     if (!g_motor_controller) {
         printf("[错误] 电机控制模块初始化失败！\n");
-        jy901s_destroy(g_jy901s_handle);
+        ble_imu_destroy(g_ble_imu_handle);
         return;
     }
 
@@ -287,9 +288,10 @@ extern "C" void app_main(void) {
     // 创建集成平衡控制任务
     xTaskCreate(balance_control_task, "balance_control_task", 4096, NULL, 5, NULL);
 
-    printf("[信息] JY901S平衡系统初始化完成，所有任务已启动\n");
+    printf("[信息] BLE IMU平衡系统初始化完成，所有任务已启动\n");
     printf("[信息] 功能说明:\n");
-    printf("  - JY901S传感器: 实时姿态数据采集和解析(模块化)\n");
-    printf("  - 平衡控制: 当ROLL角度超出%.1f°±%.1f°时，电机以%.1f速度调节\n", TARGET_ROLL_ANGLE, ROLL_TOLERANCE, MOTOR_FIXED_SPEED);
-    printf("  - 数据显示: 2Hz实时传感器数据，重点关注ROLL角\n");
+    printf("  - BLE IMU传感器: 通过蓝牙连接远程IMU设备，实时姿态数据采集\n");
+    printf("  - 平衡控制: 当PITCH角度超出%.1f°±%.1f°时，电机以%.1f速度调节\n", TARGET_PITCH_ANGLE, PITCH_TOLERANCE, MOTOR_FIXED_SPEED);
+    printf("  - 数据显示: 2Hz实时传感器数据，重点关注PITCH角\n");
+    printf("  - 目标设备: e8:cb:ed:5a:52:8e\n");
 }

@@ -597,16 +597,6 @@ CONFIG_PARTITION_TABLE_MD5=y
 # end of Partition Table
 
 #
-# Example Configuration
-#
-CONFIG_EXAMPLE_PEER_ADDR="ADDR_ANY"
-# CONFIG_EXAMPLE_EXTENDED_ADV is not set
-# CONFIG_EXAMPLE_INIT_DEINIT_LOOP is not set
-# CONFIG_EXAMPLE_ENCRYPTION is not set
-# CONFIG_EXAMPLE_USE_CI_ADDRESS is not set
-# end of Example Configuration
-
-#
 # Compiler options
 #
 CONFIG_COMPILER_OPTIMIZATION_DEBUG=y

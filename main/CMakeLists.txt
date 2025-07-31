@@ -1,12 +1,9 @@
-idf_component_register(SRCS "main.cpp" "motor_control.cpp" "jy901s.c"
+idf_component_register(SRCS "main.cpp" "motor_control.cpp" "ble_imu.c"
                     INCLUDE_DIRS "."
-                    # 关键修正：添加主程序所依赖的所有 ESP-IDF 元件
-                    # driver: 提供 uart.h 等硬件驱动
-                    # log: 提供 ESP_LOGI 等日志功能
-                    # esp_timer: 提供 esp_timer.h 时间功能
-                    # nvs_flash: WiFi 初始化需要
-                    # esp_netif: TCP/IP 网络接口
-                    # esp_wifi: WiFi 驱动
-                    # esp_event: 事件循环框架
-                    # esp_http_server: HTTP 和 WebSocket 服务器
-                    PRIV_REQUIRES driver log esp_timer nvs_flash esp_netif esp_wifi esp_event esp_http_server)
+                    # BLE IMU 平衡车系统依赖的组件
+                    # driver: 提供 uart.h, gpio.h 等硬件驱动
+                    # esp_timer: 提供 esp_task_wdt.h 看门狗功能
+                    # log: 提供 ESP_LOG* 日志功能
+                    # nvs_flash: BLE初始化需要
+                    # bt: 蓝牙基础组件(包含NimBLE)
+                    PRIV_REQUIRES driver esp_timer log nvs_flash bt)
