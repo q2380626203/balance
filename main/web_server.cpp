@@ -1,8 +1,12 @@
 #include "web_server.h"
+#include "web_page.h"
 #include "esp_log.h"
 #include "cJSON.h"
 #include <string.h>
 #include <stdlib.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/timers.h"
 
 static const char* TAG = "WebServer";
 
@@ -10,160 +14,57 @@ static const char* TAG = "WebServer";
 // --- Web服务器句柄结构 ---
 // =====================================================================================
 
+// WebSocket客户端信息
+typedef struct {
+    int fd;
+    bool active;
+} ws_client_t;
+
 struct web_server_handle {
     web_server_status_t status;
     httpd_handle_t server;
     shared_data_t* shared_data;
     bool initialized;
+    
+    // WebSocket相关
+    ws_client_t ws_clients[WEB_SERVER_MAX_WS_CLIENTS];
+    TaskHandle_t ws_broadcast_task_handle;
+    SemaphoreHandle_t ws_mutex;
 };
 
-// =====================================================================================
-// --- HTML页面内容 ---
-// =====================================================================================
-
-static const char* html_page = 
-"<!DOCTYPE html>"
-"<html lang='zh-CN'>"
-"<head>"
-"    <meta charset='UTF-8'>"
-"    <meta name='viewport' content='width=device-width, initial-scale=1.0'>"
-"    <title>ESP32 平衡车控制</title>"
-"    <style>"
-"        * { margin: 0; padding: 0; box-sizing: border-box; }"
-"        body { font-family: Arial, sans-serif; background: #f5f5f5; padding: 20px; }"
-"        .container { max-width: 800px; margin: 0 auto; background: white; border-radius: 10px; padding: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }"
-"        h1 { text-align: center; color: #333; margin-bottom: 30px; }"
-"        .status-panel { background: #e8f4fd; padding: 15px; border-radius: 8px; margin-bottom: 20px; }"
-"        .status-item { display: flex; justify-content: space-between; margin: 5px 0; }"
-"        .config-panel { background: #f8f9fa; padding: 15px; border-radius: 8px; margin-bottom: 20px; }"
-"        .config-item { margin: 15px 0; }"
-"        .config-item label { display: block; margin-bottom: 5px; font-weight: bold; }"
-"        .config-item input { width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; }"
-"        .button-group { text-align: center; margin-top: 20px; }"
-"        .btn { padding: 10px 20px; margin: 0 10px; border: none; border-radius: 5px; cursor: pointer; font-size: 16px; }"
-"        .btn-primary { background: #007bff; color: white; }"
-"        .btn-success { background: #28a745; color: white; }"
-"        .btn-warning { background: #ffc107; color: black; }"
-"        .btn:hover { opacity: 0.8; }"
-"        .data-display { font-family: monospace; font-size: 18px; font-weight: bold; }"
-"        @media (max-width: 600px) { .container { padding: 15px; } .btn { display: block; width: 100%; margin: 5px 0; } }"
-"    </style>"
-"</head>"
-"<body>"
-"    <div class='container'>"
-"        <h1>🤖 ESP32 平衡车控制台</h1>"
-"        "
-"        <div class='status-panel'>"
-"            <h3>📊 实时状态</h3>"
-"            <div class='status-item'><span>BLE连接状态:</span> <span id='ble-status'>检查中...</span></div>"
-"            <div class='status-item'><span>WiFi客户端:</span> <span id='wifi-clients'>0</span></div>"
-"            <div class='status-item'><span>当前Pitch角:</span> <span id='pitch-angle' class='data-display'>0.0°</span></div>"
-"            <div class='status-item'><span>电机状态:</span> <span id='motor-status'>停止</span></div>"
-"            <div class='status-item'><span>平衡状态:</span> <span id='balance-status'>平衡</span></div>"
-"        </div>"
-"        "
-"        <div class='config-panel'>"
-"            <h3>⚙️ 参数配置</h3>"
-"            <div class='config-item'>"
-"                <label for='target-pitch'>目标Pitch角 (度):</label>"
-"                <input type='number' id='target-pitch' step='0.1' value='0.0'>"
-"            </div>"
-"            <div class='config-item'>"
-"                <label for='pitch-tolerance'>Pitch容差 (度):</label>"
-"                <input type='number' id='pitch-tolerance' step='0.5' value='10.0'>"
-"            </div>"
-"            <div class='config-item'>"
-"                <label for='motor-speed'>电机速度:</label>"
-"                <input type='number' id='motor-speed' step='1.0' value='30.0'>"
-"            </div>"
-"            <div class='config-item'>"
-"                <label for='enable-delay'>启动延时 (ms):</label>"
-"                <input type='number' id='enable-delay' step='50' value='500'>"
-"            </div>"
-"        </div>"
-"        "
-"        <div class='button-group'>"
-"            <button class='btn btn-primary' onclick='saveConfig()'>💾 保存配置</button>"
-"            <button class='btn btn-warning' onclick='resetConfig()'>🔄 恢复默认</button>"
-"            <button class='btn btn-success' onclick='refreshData()'>📡 刷新数据</button>"
-"        </div>"
-"    </div>"
-"    "
-"    <script>"
-"        function updateStatus() {"
-"            fetch('/api/status')"
-"                .then(response => response.json())"
-"                .then(data => {"
-"                    document.getElementById('ble-status').textContent = data.ble_connected ? '已连接' : '未连接';"
-"                    document.getElementById('pitch-angle').textContent = data.sensor_data.pitch.toFixed(1) + '°';"
-"                    document.getElementById('motor-status').textContent = data.motor_enabled ? '运行中' : '停止';"
-"                    document.getElementById('balance-status').textContent = data.in_tolerance ? '平衡' : '调节中';"
-"                });"
-"        }"
-"        "
-"        function loadConfig() {"
-"            fetch('/api/config')"
-"                .then(response => response.json())"
-"                .then(data => {"
-"                    document.getElementById('target-pitch').value = data.target_pitch_angle;"
-"                    document.getElementById('pitch-tolerance').value = data.pitch_tolerance;"
-"                    document.getElementById('motor-speed').value = data.motor_fixed_speed;"
-"                    document.getElementById('enable-delay').value = data.enable_delay_ms;"
-"                });"
-"        }"
-"        "
-"        function saveConfig() {"
-"            const config = {"
-"                target_pitch_angle: parseFloat(document.getElementById('target-pitch').value),"
-"                pitch_tolerance: parseFloat(document.getElementById('pitch-tolerance').value),"
-"                motor_fixed_speed: parseFloat(document.getElementById('motor-speed').value),"
-"                enable_delay_ms: parseFloat(document.getElementById('enable-delay').value),"
-"                auto_restart_enabled: true,"
-"                restart_threshold: 1.0"
-"            };"
-"            "
-"            fetch('/api/config', {"
-"                method: 'POST',"
-"                headers: { 'Content-Type': 'application/json' },"
-"                body: JSON.stringify(config)"
-"            })"
-"            .then(response => response.json())"
-"            .then(data => {"
-"                alert(data.success ? '配置保存成功！' : '配置保存失败！');"
-"            });"
-"        }"
-"        "
-"        function resetConfig() {"
-"            if (confirm('确定要恢复默认配置吗？')) {"
-"                fetch('/api/config/reset', { method: 'POST' })"
-"                    .then(response => response.json())"
-"                    .then(data => {"
-"                        if (data.success) {"
-"                            loadConfig();"
-"                            alert('已恢复默认配置！');"
-"                        }"
-"                    });"
-"            }"
-"        }"
-"        "
-"        function refreshData() {"
-"            loadConfig();"
-"            updateStatus();"
-"        }"
-"        "
-"        // 页面加载时初始化"
-"        window.onload = function() {"
-"            loadConfig();"
-"            updateStatus();"
-"            setInterval(updateStatus, 1000); // 每秒更新状态"
-"        };"
-"    </script>"
-"</body>"
-"</html>";
 
 // =====================================================================================
 // --- HTTP处理函数 ---
 // =====================================================================================
+
+// WebSocket测试页面
+static const char* test_page = 
+"<!DOCTYPE html>"
+"<html><head><title>WebSocket Test</title></head><body>"
+"<h1>WebSocket Connection Test</h1>"
+"<div id='status'>连接中...</div>"
+"<div id='log'></div>"
+"<script>"
+"function log(msg) {"
+"  const logDiv = document.getElementById('log');"
+"  logDiv.innerHTML += '<div>' + new Date().toLocaleTimeString() + ': ' + msg + '</div>';"
+"}"
+"const ws = new WebSocket('ws://' + window.location.host + '/ws');"
+"ws.onopen = function() { document.getElementById('status').textContent = '已连接'; log('WebSocket连接成功'); };"
+"ws.onclose = function() { document.getElementById('status').textContent = '已断开'; log('WebSocket连接关闭'); };"
+"ws.onerror = function(e) { document.getElementById('status').textContent = '错误'; log('WebSocket错误: ' + e); };"
+"ws.onmessage = function(e) { log('收到消息: ' + e.data); };"
+"</script></body></html>";
+
+// WebSocket测试页面处理
+static esp_err_t test_handler(httpd_req_t *req) {
+    web_server_handle_t* handle = (web_server_handle_t*)req->user_ctx;
+    handle->status.request_count++;
+    
+    httpd_resp_set_type(req, "text/html");
+    httpd_resp_send(req, test_page, strlen(test_page));
+    return ESP_OK;
+}
 
 // 主页处理
 static esp_err_t root_handler(httpd_req_t *req) {
@@ -171,7 +72,7 @@ static esp_err_t root_handler(httpd_req_t *req) {
     handle->status.request_count++;
     
     httpd_resp_set_type(req, "text/html");
-    httpd_resp_send(req, html_page, strlen(html_page));
+    httpd_resp_send(req, html_page_fixed, strlen(html_page_fixed));
     return ESP_OK;
 }
 
@@ -269,6 +170,14 @@ static esp_err_t config_post_handler(httpd_req_t *req) {
     
     bool success = shared_data_set_config(handle->shared_data, &config);
     
+    // 如果配置设置成功，同时保存到NVS
+    if (success) {
+        success = shared_data_save_config_to_nvs(handle->shared_data);
+        if (!success) {
+            ESP_LOGW(TAG, "Configuration updated but failed to save to NVS");
+        }
+    }
+    
     cJSON *response = cJSON_CreateObject();
     cJSON_AddBoolToObject(response, "success", success);
     
@@ -305,6 +214,164 @@ static esp_err_t config_reset_handler(httpd_req_t *req) {
 }
 
 // =====================================================================================
+// --- WebSocket处理函数 ---
+// =====================================================================================
+
+// WebSocket数据广播函数 - 优化栈使用
+static void ws_broadcast_data(web_server_handle_t* handle) {
+    if (!handle || !handle->shared_data) {
+        ESP_LOGD(TAG, "Invalid handle or shared_data in ws_broadcast_data");
+        return;
+    }
+    
+    // 获取系统状态
+    system_status_t status;
+    if (!shared_data_get_status(handle->shared_data, &status)) {
+        ESP_LOGD(TAG, "Failed to get system status for WebSocket broadcast");
+        return;
+    }
+    
+    // 使用静态缓冲区而不是动态分配，减少栈压力
+    static char json_buffer[512];
+    
+    // 手动构建JSON字符串，避免cJSON的栈开销
+    int len = snprintf(json_buffer, sizeof(json_buffer),
+        "{"
+        "\"ble_connected\":%s,"
+        "\"motor_enabled\":%s,"
+        "\"in_tolerance\":%s,"
+        "\"pitch\":%.1f,"
+        "\"roll\":%.1f,"
+        "\"yaw\":%.1f,"
+        "\"uptime_ms\":%lu"
+        "}",
+        status.ble_connected ? "true" : "false",
+        status.motor_enabled ? "true" : "false", 
+        status.in_tolerance ? "true" : "false",
+        status.sensor_data.pitch,
+        status.sensor_data.roll,
+        status.sensor_data.yaw,
+        status.uptime_ms
+    );
+    
+    if (len <= 0 || len >= sizeof(json_buffer)) {
+        ESP_LOGW(TAG, "JSON buffer overflow or format error");
+        return;
+    }
+    
+    // 广播给所有WebSocket客户端
+    if (xSemaphoreTake(handle->ws_mutex, pdMS_TO_TICKS(5)) == pdPASS) {
+        int active_clients = 0;
+        for (int i = 0; i < WEB_SERVER_MAX_WS_CLIENTS; i++) {
+            if (handle->ws_clients[i].active) {
+                active_clients++;
+                httpd_ws_frame_t ws_pkt;
+                memset(&ws_pkt, 0, sizeof(httpd_ws_frame_t));
+                ws_pkt.payload = (uint8_t*)json_buffer;
+                ws_pkt.len = (size_t)len;
+                ws_pkt.type = HTTPD_WS_TYPE_TEXT;
+                
+                esp_err_t ret = httpd_ws_send_frame_async(handle->server, handle->ws_clients[i].fd, &ws_pkt);
+                if (ret != ESP_OK) {
+                    ESP_LOGD(TAG, "WebSocket client %d disconnected: %s", i, esp_err_to_name(ret));
+                    handle->ws_clients[i].active = false;
+                    active_clients--;
+                }
+            }
+        }
+        
+        // 每10秒记录一次活跃连接数
+        static int log_counter = 0;
+        if (++log_counter >= 10) {
+            ESP_LOGI(TAG, "WebSocket: %d active clients, broadcasting: %.50s...", active_clients, json_buffer);
+            log_counter = 0;
+        }
+        
+        xSemaphoreGive(handle->ws_mutex);
+    }
+}
+
+// WebSocket广播任务
+static void ws_broadcast_task(void* parameter) {
+    web_server_handle_t* handle = (web_server_handle_t*)parameter;
+    
+    ESP_LOGI(TAG, "WebSocket broadcast task started");
+    
+    while (handle) {
+        // 检查服务器状态
+        if (handle->status.state != WEB_SERVER_RUNNING) {
+            ESP_LOGW(TAG, "Web server not running, WebSocket task exiting");
+            break;
+        }
+        
+        ws_broadcast_data(handle);
+        vTaskDelay(pdMS_TO_TICKS(100)); // 每100ms广播一次
+    }
+    
+    ESP_LOGI(TAG, "WebSocket broadcast task ended");
+    vTaskDelete(NULL);
+}
+
+// WebSocket处理函数
+static esp_err_t ws_handler(httpd_req_t *req) {
+    web_server_handle_t* handle = (web_server_handle_t*)req->user_ctx;
+    
+    ESP_LOGI(TAG, "WebSocket handler called, method: %d", req->method);
+    
+    if (req->method == HTTP_GET) {
+        ESP_LOGI(TAG, "WebSocket connection established");
+        
+        // 添加客户端到列表
+        if (xSemaphoreTake(handle->ws_mutex, pdMS_TO_TICKS(100)) == pdPASS) {
+            for (int i = 0; i < WEB_SERVER_MAX_WS_CLIENTS; i++) {
+                if (!handle->ws_clients[i].active) {
+                    handle->ws_clients[i].fd = httpd_req_to_sockfd(req);
+                    handle->ws_clients[i].active = true;
+                    ESP_LOGI(TAG, "WebSocket client %d connected (fd=%d)", i, handle->ws_clients[i].fd);
+                    break;
+                }
+            }
+            xSemaphoreGive(handle->ws_mutex);
+        }
+        
+        return ESP_OK;
+    }
+    
+    // 处理WebSocket帧
+    httpd_ws_frame_t ws_pkt;
+    uint8_t *buf = NULL;
+    memset(&ws_pkt, 0, sizeof(httpd_ws_frame_t));
+    ws_pkt.type = HTTPD_WS_TYPE_TEXT;
+    
+    esp_err_t ret = httpd_ws_recv_frame(req, &ws_pkt, 0);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to get WebSocket frame length: %s", esp_err_to_name(ret));
+        return ret;
+    }
+    
+    if (ws_pkt.len) {
+        buf = (uint8_t*)calloc(1, ws_pkt.len + 1);
+        if (buf == NULL) {
+            ESP_LOGE(TAG, "Failed to allocate memory for WebSocket buffer");
+            return ESP_ERR_NO_MEM;
+        }
+        ws_pkt.payload = buf;
+        
+        ret = httpd_ws_recv_frame(req, &ws_pkt, ws_pkt.len);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to receive WebSocket frame: %s", esp_err_to_name(ret));
+            free(buf);
+            return ret;
+        }
+        
+        ESP_LOGI(TAG, "Received WebSocket message: %s", ws_pkt.payload);
+        free(buf);
+    }
+    
+    return ESP_OK;
+}
+
+// =====================================================================================
 // --- 公共接口实现 ---
 // =====================================================================================
 
@@ -325,6 +392,22 @@ web_server_handle_t* web_server_init(shared_data_t* shared_data) {
     handle->status.state = WEB_SERVER_STOPPED;
     handle->status.port = WEB_SERVER_PORT;
     handle->initialized = true;
+    
+    // 初始化WebSocket相关资源
+    handle->ws_mutex = xSemaphoreCreateMutex();
+    if (!handle->ws_mutex) {
+        ESP_LOGE(TAG, "Failed to create WebSocket mutex");
+        free(handle);
+        return NULL;
+    }
+    
+    // 初始化WebSocket客户端列表
+    for (int i = 0; i < WEB_SERVER_MAX_WS_CLIENTS; i++) {
+        handle->ws_clients[i].active = false;
+        handle->ws_clients[i].fd = -1;
+    }
+    
+    handle->ws_broadcast_task_handle = NULL;
     
     ESP_LOGI(TAG, "Web server module initialized successfully");
     return handle;
@@ -364,6 +447,14 @@ bool web_server_start(web_server_handle_t* handle) {
     };
     httpd_register_uri_handler(handle->server, &root_uri);
     
+    httpd_uri_t test_uri = {
+        .uri = "/test",
+        .method = HTTP_GET,
+        .handler = test_handler,
+        .user_ctx = handle
+    };
+    httpd_register_uri_handler(handle->server, &test_uri);
+    
     httpd_uri_t status_uri = {
         .uri = "/api/status",
         .method = HTTP_GET,
@@ -396,8 +487,37 @@ bool web_server_start(web_server_handle_t* handle) {
     };
     httpd_register_uri_handler(handle->server, &config_reset_uri);
     
+    // 注册WebSocket处理器
+    httpd_uri_t ws_uri = {
+        .uri = "/ws",
+        .method = HTTP_GET,
+        .handler = ws_handler,
+        .user_ctx = handle,
+        .is_websocket = true
+    };
+    httpd_register_uri_handler(handle->server, &ws_uri);
+    
+    // 确保状态已设置为RUNNING，任务才能正常运行
     handle->status.state = WEB_SERVER_RUNNING;
-    ESP_LOGI(TAG, "Web server started on port %d", WEB_SERVER_PORT);
+    
+    // 创建WebSocket广播任务（更大的栈空间）
+    BaseType_t task_created = xTaskCreate(
+        ws_broadcast_task,           // 任务函数
+        "ws_broadcast",              // 任务名称  
+        4096,                        // 栈大小（4KB）
+        handle,                      // 参数
+        3,                           // 优先级（中等）
+        &handle->ws_broadcast_task_handle // 任务句柄
+    );
+    
+    if (task_created == pdPASS) {
+        ESP_LOGI(TAG, "WebSocket broadcast task created successfully");
+    } else {
+        ESP_LOGE(TAG, "Failed to create WebSocket broadcast task");
+        return false;
+    }
+    
+    ESP_LOGI(TAG, "Web server started on port %d with WebSocket support", WEB_SERVER_PORT);
     return true;
 }
 
@@ -410,6 +530,22 @@ bool web_server_stop(web_server_handle_t* handle) {
     if (handle->status.state == WEB_SERVER_STOPPED) {
         ESP_LOGW(TAG, "Web server already stopped");
         return true;
+    }
+    
+    // 停止WebSocket广播任务
+    if (handle->ws_broadcast_task_handle) {
+        vTaskDelete(handle->ws_broadcast_task_handle);
+        handle->ws_broadcast_task_handle = NULL;
+        ESP_LOGI(TAG, "WebSocket broadcast task stopped");
+    }
+    
+    // 清理WebSocket客户端
+    if (xSemaphoreTake(handle->ws_mutex, pdMS_TO_TICKS(100)) == pdPASS) {
+        for (int i = 0; i < WEB_SERVER_MAX_WS_CLIENTS; i++) {
+            handle->ws_clients[i].active = false;
+            handle->ws_clients[i].fd = -1;
+        }
+        xSemaphoreGive(handle->ws_mutex);
     }
     
     if (handle->server) {
@@ -448,6 +584,11 @@ void web_server_destroy(web_server_handle_t* handle) {
     
     if (handle->status.state == WEB_SERVER_RUNNING) {
         web_server_stop(handle);
+    }
+    
+    // 清理WebSocket互斥锁
+    if (handle->ws_mutex) {
+        vSemaphoreDelete(handle->ws_mutex);
     }
     
     free(handle);

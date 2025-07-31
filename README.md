@@ -93,11 +93,14 @@ float ble_imu_get_pitch(ble_imu_handle_t* handle);  // 平衡控制关键轴
 ### Web服务器模块 (`main/web_server.c/h`)
 - **服务端口**: HTTP 80
 - **访问地址**: `http://192.168.4.1`
+- **WebSocket支持**: 实时数据推送 (100ms更新频率)
 - **功能特性**:
-  - 实时系统状态显示
+  - 现代化响应式Web界面
+  - 实时姿态角度显示 (Roll/Pitch/Yaw)
+  - BLE连接和平衡状态监控
   - 平衡参数在线调节
-  - IMU数据可视化图表
-  - 系统配置管理界面
+  - 配置持久化存储 (NVS)
+  - 一键恢复默认设置
 
 ## 🔧 硬件配置
 
@@ -132,6 +135,10 @@ typedef struct {
     float restart_threshold;     // 重启阈值
 } balance_config_t;
 
+// 配置持久化存储 (NVS)
+bool shared_data_save_config_to_nvs(shared_data_t* shared_data);
+bool shared_data_load_config_from_nvs(shared_data_t* shared_data);
+
 // 系统状态监控
 typedef struct {
     bool ble_connected;          // BLE连接状态
@@ -152,13 +159,14 @@ typedef struct {
 ### 项目文件结构
 ```
 main/
-├── main.cpp              # 系统初始化和模块协调
-├── shared_data.c/h       # 共享数据管理器（线程安全）
+├── main.cpp              # 系统初始化和模块协调 (新增NVS初化)
+├── shared_data.c/h       # 共享数据管理器（线程安全+NVS存储）
 ├── balance_controller.c/h # 平衡控制器模块
 ├── ble_imu.c/h          # BLE IMU传感器模块
 ├── motor_control.cpp/h   # 电机控制驱动
 ├── wifi_ap.c/h          # WiFi AP热点模块
-├── web_server.c/h       # Web服务器模块
+├── web_server.c/h       # Web服务器模块 (新增WebSocket支持)
+├── web_page.h           # 现代化Web界面 (新增文件)
 ├── CMakeLists.txt       # ESP-IDF构建配置
 ├── partitions.csv       # 自定义分区表
 └── old/                 # 历史版本传感器代码
@@ -241,10 +249,18 @@ if (abs(pitch_error) > config.pitch_tolerance) {
 - **系统信息**: CPU使用率、内存状态、运行时间
 
 ### Web界面功能
-- 📈 **实时图表**: 姿态角度变化曲线
-- ⚙️ **参数调节**: 在线修改平衡控制参数
-- 📋 **状态面板**: 系统各模块运行状态
-- 🔧 **配置管理**: 保存/恢复系统配置
+- 📊 **实时监控面板**: 
+  - Roll/Pitch/Yaw三轴角度实时显示
+  - BLE连接状态和平衡状态指示
+  - 100ms高频数据更新，流畅监控
+- ⚙️ **参数调整面板**: 
+  - 目标俯仰角、俯仰容差、电机速度等参数调节
+  - 启动延迟、重启阈值、自动重启开关
+  - 配置自动保存到NVS持久存储
+- 🎨 **现代化界面设计**:
+  - 响应式布局，支持手机/电脑访问
+  - 渐变背景、卡片式设计、流畅动画
+  - 直观的状态颜色指示和用户反馈
 
 ## 📡 通信协议
 
@@ -255,13 +271,15 @@ if (abs(pitch_error) > config.pitch_tolerance) {
 - **数据内容**: 完整9轴IMU + 四元数 + 磁场数据
 
 ### WiFi Web通信
-- **协议**: HTTP REST API
+- **协议**: HTTP REST API + WebSocket实时推送
 - **数据格式**: JSON格式数据交换
-- **实时更新**: WebSocket长连接支持(可选)
+- **实时更新**: WebSocket 100ms高频数据推送
 - **API端点**: 
+  - `GET /` - 现代化Web控制界面
   - `GET /api/status` - 获取系统状态
-  - `POST /api/config` - 更新配置参数
-  - `GET /api/data` - 获取实时传感器数据
+  - `POST /api/config` - 更新配置参数 (自动保存到NVS)
+  - `POST /api/config/reset` - 一键恢复默认设置
+  - `WS /ws` - WebSocket实时数据流
 
 ## ⚠️ 部署注意事项
 
@@ -288,17 +306,19 @@ if (abs(pitch_error) > config.pitch_tolerance) {
 
 ## 🔄 版本演进历史
 
-### 🚀 当前版本 (v3.0 - 双协议通信系统)
+### 🚀 当前版本 (v3.1 - 现代化Web界面系统)
+- **WebSocket实时通信**: 100ms高频数据推送，流畅实时监控
+- **现代化Web界面**: 响应式设计，渐变UI，手机/电脑兼容
+- **配置持久化**: NVS存储系统，配置断电保存
+- **紧凑显示优化**: 专为实时监控优化的紧凑界面布局
 - **架构重构**: 完全模块化设计，采用共享数据管理器
 - **双协议支持**: BLE IMU数据采集 + WiFi Web配置界面
-- **Web管理**: 实时监控界面和参数在线调节功能
-- **资源升级**: 4MB Flash + 自定义分区表 + 高频FreeRTOS
-- **平台优化**: 专为ESP32S3双协议并发优化
 
 ### 📝 历史版本对比
 | 版本 | 传感器 | 通信方式 | 控制轴 | 主要特性 |
 |------|-------|----------|--------|----------|
-| **v3.0** | BLE IMU | BLE+WiFi双协议 | PITCH | 模块化架构+Web界面 |
+| **v3.1** | BLE IMU | BLE+WiFi+WebSocket | PITCH | 现代化Web界面+实时通信+NVS存储 |
+| v3.0 | BLE IMU | BLE+WiFi双协议 | PITCH | 模块化架构+基础Web界面 |
 | v2.0 | BLE IMU | BLE单协议 | PITCH | 无线连接+线程安全 |
 | v1.x | JY901S | UART有线 | ROLL | 基础平衡控制 |
 | v0.x | GY25T/KY9250 | UART有线 | ROLL | 早期原型 |
@@ -310,11 +330,12 @@ if (abs(pitch_error) > config.pitch_tolerance) {
 
 ## 📋 开发路线图
 
-### 🎯 下一版本计划 (v3.1)
+### 🎯 下一版本计划 (v3.2)
 - **OTA升级**: 基于Web界面的固件在线升级
 - **数据存储**: 历史数据记录和分析功能
 - **高级控制**: PID控制算法和参数自整定
 - **多设备**: 支持多个BLE IMU设备并发
+- **图表功能**: 实时角度曲线图和数据分析
 
 ### 🔮 未来扩展方向
 - **云端连接**: 数据上传到云平台进行分析

@@ -90,6 +90,10 @@ ble_imu_handle_t* shared_data_get_ble_imu_handle(shared_data_t* shared_data);
 // 默认配置
 balance_config_t shared_data_get_default_config(void);
 
+// 配置持久化存储
+bool shared_data_load_config_from_nvs(shared_data_t* shared_data);
+bool shared_data_save_config_to_nvs(shared_data_t* shared_data);
+
 #ifdef __cplusplus
 }
 #endif

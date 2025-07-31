@@ -4,6 +4,7 @@
 #include "freertos/task.h"
 #include "esp_task_wdt.h"
 #include "esp_log.h"
+#include "nvs_flash.h"
 
 // 模块化系统组件
 #include "shared_data.h"
@@ -200,6 +201,20 @@ extern "C" void app_main(void) {
     esp_task_wdt_deinit();
     
     ESP_LOGI(TAG, "🚀 ESP32 平衡车双协议通信系统启动中...");
+    
+    // 初始化NVS - 必须在其他模块之前
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_LOGW(TAG, "NVS分区需要擦除，正在重新初始化...");
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "❌ NVS初始化失败: %s", esp_err_to_name(ret));
+        return;
+    }
+    ESP_LOGI(TAG, "✓ NVS存储系统初始化成功");
+    
     ESP_LOGI(TAG, "--- 系统将在5秒后启动，请保持设备静止 ---");
     vTaskDelay(pdMS_TO_TICKS(5000));
     

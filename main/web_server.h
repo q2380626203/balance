@@ -14,6 +14,7 @@ extern "C" {
 #define WEB_SERVER_PORT 80
 #define WEB_SERVER_MAX_URI_LEN 128
 #define WEB_SERVER_MAX_RESP_LEN 2048
+#define WEB_SERVER_MAX_WS_CLIENTS 4
 
 // =====================================================================================
 // --- Web服务器状态 ---
