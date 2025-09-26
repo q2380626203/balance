@@ -182,6 +182,27 @@ ble_imu_handle_t* shared_data_get_ble_imu_handle(shared_data_t* shared_data) {
     return handle;
 }
 
+void shared_data_set_balance_controller(shared_data_t* shared_data, balance_controller_handle_t* controller) {
+    if (!shared_data) return;
+    
+    if (xSemaphoreTake(shared_data->mutex, pdMS_TO_TICKS(100)) == pdPASS) {
+        shared_data->balance_controller = controller;
+        xSemaphoreGive(shared_data->mutex);
+    }
+}
+
+balance_controller_handle_t* shared_data_get_balance_controller(shared_data_t* shared_data) {
+    if (!shared_data) return NULL;
+    
+    balance_controller_handle_t* controller = NULL;
+    if (xSemaphoreTake(shared_data->mutex, pdMS_TO_TICKS(10)) == pdPASS) {
+        controller = shared_data->balance_controller;
+        xSemaphoreGive(shared_data->mutex);
+    }
+    
+    return controller;
+}
+
 // =====================================================================================
 // --- 配置持久化存储实现 ---
 // =====================================================================================

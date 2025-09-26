@@ -5,6 +5,9 @@
 #include "ble_imu.h"
 #include "motor_control.h"
 
+// 前向声明
+typedef struct balance_controller_handle balance_controller_handle_t;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -61,6 +64,7 @@ typedef struct {
     // 模块句柄
     motor_controller_t* motor_controller;
     ble_imu_handle_t* ble_imu_handle;
+    balance_controller_handle_t* balance_controller;
 } shared_data_t;
 
 // =====================================================================================
@@ -84,8 +88,10 @@ bool shared_data_update_status(shared_data_t* shared_data, const system_status_t
 // 模块句柄操作
 void shared_data_set_motor_controller(shared_data_t* shared_data, motor_controller_t* controller);
 void shared_data_set_ble_imu_handle(shared_data_t* shared_data, ble_imu_handle_t* handle);
+void shared_data_set_balance_controller(shared_data_t* shared_data, balance_controller_handle_t* controller);
 motor_controller_t* shared_data_get_motor_controller(shared_data_t* shared_data);
 ble_imu_handle_t* shared_data_get_ble_imu_handle(shared_data_t* shared_data);
+balance_controller_handle_t* shared_data_get_balance_controller(shared_data_t* shared_data);
 
 // 默认配置
 balance_config_t shared_data_get_default_config(void);

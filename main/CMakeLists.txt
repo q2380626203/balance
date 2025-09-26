@@ -1,5 +1,6 @@
 idf_component_register(SRCS "main.cpp" 
                            "motor_control.cpp" 
+                           "uart_monitor.c"
                            "ble_imu.c"
                            "shared_data.cpp"
                            "wifi_ap.cpp"

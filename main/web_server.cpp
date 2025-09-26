@@ -1,5 +1,6 @@
 #include "web_server.h"
 #include "web_page.h"
+#include "web_page_debug.h"
 #include "esp_log.h"
 #include "cJSON.h"
 #include <string.h>
@@ -7,6 +8,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/timers.h"
+#include "motor_control.h"
+#include "balance_controller.h"
 
 static const char* TAG = "WebServer";
 
@@ -202,6 +205,272 @@ static esp_err_t config_reset_handler(httpd_req_t *req) {
     
     cJSON *response = cJSON_CreateObject();
     cJSON_AddBoolToObject(response, "success", success);
+    
+    char *response_string = cJSON_Print(response);
+    
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, response_string, strlen(response_string));
+    
+    free(response_string);
+    cJSON_Delete(response);
+    return ESP_OK;
+}
+
+// Debug页面处理
+static esp_err_t debug_handler(httpd_req_t *req) {
+    web_server_handle_t* handle = (web_server_handle_t*)req->user_ctx;
+    handle->status.request_count++;
+    
+    httpd_resp_set_type(req, "text/html");
+    httpd_resp_send(req, html_debug_page, strlen(html_debug_page));
+    return ESP_OK;
+}
+
+// 错误查询API
+static esp_err_t debug_query_error_handler(httpd_req_t *req) {
+    web_server_handle_t* handle = (web_server_handle_t*)req->user_ctx;
+    handle->status.request_count++;
+    
+    char buf[256];
+    int ret = httpd_req_recv(req, buf, sizeof(buf) - 1);
+    if (ret <= 0) {
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+    buf[ret] = '\0';
+    
+    cJSON *json = cJSON_Parse(buf);
+    if (!json) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+        return ESP_FAIL;
+    }
+    
+    cJSON *error_type_item = cJSON_GetObjectItem(json, "error_type");
+    if (!error_type_item || !cJSON_IsNumber(error_type_item)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing or invalid error_type");
+        cJSON_Delete(json);
+        return ESP_FAIL;
+    }
+    
+    int error_type = (int)error_type_item->valuedouble;
+    
+    // 获取电机控制器
+    motor_controller_t* motor_controller = shared_data_get_motor_controller(handle->shared_data);
+    if (!motor_controller) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Motor controller not available");
+        cJSON_Delete(json);
+        return ESP_FAIL;
+    }
+    
+    // 查询错误
+    motor_control_query_errors(motor_controller, error_type);
+    
+    cJSON *response = cJSON_CreateObject();
+    cJSON_AddBoolToObject(response, "success", true);
+    cJSON_AddStringToObject(response, "message", "Error query initiated");
+    
+    char *response_string = cJSON_Print(response);
+    
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, response_string, strlen(response_string));
+    
+    free(response_string);
+    cJSON_Delete(response);
+    cJSON_Delete(json);
+    return ESP_OK;
+}
+
+// 清除错误API
+static esp_err_t debug_clear_errors_handler(httpd_req_t *req) {
+    web_server_handle_t* handle = (web_server_handle_t*)req->user_ctx;
+    handle->status.request_count++;
+    
+    // 获取电机控制器
+    motor_controller_t* motor_controller = shared_data_get_motor_controller(handle->shared_data);
+    if (!motor_controller) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Motor controller not available");
+        return ESP_FAIL;
+    }
+    
+    // 清除电机错误
+    motor_control_clear_errors(motor_controller);
+    
+    cJSON *response = cJSON_CreateObject();
+    cJSON_AddBoolToObject(response, "success", true);
+    cJSON_AddStringToObject(response, "message", "Motor errors cleared");
+    
+    char *response_string = cJSON_Print(response);
+    
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, response_string, strlen(response_string));
+    
+    free(response_string);
+    cJSON_Delete(response);
+    return ESP_OK;
+}
+
+// 使能电机API
+static esp_err_t debug_enable_motor_handler(httpd_req_t *req) {
+    web_server_handle_t* handle = (web_server_handle_t*)req->user_ctx;
+    handle->status.request_count++;
+    
+    // 获取电机控制器
+    motor_controller_t* motor_controller = shared_data_get_motor_controller(handle->shared_data);
+    if (!motor_controller) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Motor controller not available");
+        return ESP_FAIL;
+    }
+    
+    // 使能电机
+    motor_control_enable(motor_controller, true);
+    
+    cJSON *response = cJSON_CreateObject();
+    cJSON_AddBoolToObject(response, "success", true);
+    cJSON_AddStringToObject(response, "message", "Motor enabled");
+    
+    char *response_string = cJSON_Print(response);
+    
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, response_string, strlen(response_string));
+    
+    free(response_string);
+    cJSON_Delete(response);
+    return ESP_OK;
+}
+
+// 重启电机API
+static esp_err_t debug_restart_motor_handler(httpd_req_t *req) {
+    web_server_handle_t* handle = (web_server_handle_t*)req->user_ctx;
+    handle->status.request_count++;
+    
+    // 获取电机控制器
+    motor_controller_t* motor_controller = shared_data_get_motor_controller(handle->shared_data);
+    if (!motor_controller) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Motor controller not available");
+        return ESP_FAIL;
+    }
+    
+    // 重启电机
+    motor_control_restart(motor_controller);
+    
+    cJSON *response = cJSON_CreateObject();
+    cJSON_AddBoolToObject(response, "success", true);
+    cJSON_AddStringToObject(response, "message", "Motor restart command sent");
+    
+    char *response_string = cJSON_Print(response);
+    
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, response_string, strlen(response_string));
+    
+    free(response_string);
+    cJSON_Delete(response);
+    return ESP_OK;
+}
+
+// 启动平衡控制API
+static esp_err_t debug_start_balance_handler(httpd_req_t *req) {
+    web_server_handle_t* handle = (web_server_handle_t*)req->user_ctx;
+    handle->status.request_count++;
+    
+    // 获取平衡控制器
+    balance_controller_handle_t* balance_controller = shared_data_get_balance_controller(handle->shared_data);
+    if (!balance_controller) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Balance controller not available");
+        return ESP_FAIL;
+    }
+    
+    // 启动平衡控制
+    bool success = balance_controller_start(balance_controller);
+    
+    cJSON *response = cJSON_CreateObject();
+    cJSON_AddBoolToObject(response, "success", success);
+    cJSON_AddStringToObject(response, "message", success ? "Balance control started" : "Failed to start balance control");
+    
+    char *response_string = cJSON_Print(response);
+    
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, response_string, strlen(response_string));
+    
+    free(response_string);
+    cJSON_Delete(response);
+    return ESP_OK;
+}
+
+// 停止平衡控制API
+static esp_err_t debug_stop_balance_handler(httpd_req_t *req) {
+    web_server_handle_t* handle = (web_server_handle_t*)req->user_ctx;
+    handle->status.request_count++;
+    
+    // 获取平衡控制器
+    balance_controller_handle_t* balance_controller = shared_data_get_balance_controller(handle->shared_data);
+    if (!balance_controller) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Balance controller not available");
+        return ESP_FAIL;
+    }
+    
+    // 停止平衡控制
+    bool success = balance_controller_stop(balance_controller);
+    
+    cJSON *response = cJSON_CreateObject();
+    cJSON_AddBoolToObject(response, "success", success);
+    cJSON_AddStringToObject(response, "message", success ? "Balance control stopped" : "Failed to stop balance control");
+    
+    char *response_string = cJSON_Print(response);
+    
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, response_string, strlen(response_string));
+    
+    free(response_string);
+    cJSON_Delete(response);
+    return ESP_OK;
+}
+
+// 获取错误状态API
+static esp_err_t debug_error_status_handler(httpd_req_t *req) {
+    web_server_handle_t* handle = (web_server_handle_t*)req->user_ctx;
+    handle->status.request_count++;
+    
+    // 获取电机控制器
+    motor_controller_t* motor_controller = shared_data_get_motor_controller(handle->shared_data);
+    if (!motor_controller) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Motor controller not available");
+        return ESP_FAIL;
+    }
+    
+    // 获取错误状态
+    motor_error_status_t* error_status = motor_control_get_error_status(motor_controller);
+    if (!error_status) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to get error status");
+        return ESP_FAIL;
+    }
+    
+    cJSON *response = cJSON_CreateObject();
+    cJSON_AddBoolToObject(response, "success", true);
+    
+    cJSON *errors = cJSON_CreateObject();
+    cJSON_AddNumberToObject(errors, "motor_error", error_status->motor_error);
+    cJSON_AddNumberToObject(errors, "encoder_error", error_status->encoder_error);
+    cJSON_AddNumberToObject(errors, "controller_error", error_status->controller_error);
+    cJSON_AddNumberToObject(errors, "system_error", error_status->system_error);
+    cJSON_AddBoolToObject(errors, "error_data_valid", error_status->error_data_valid);
+    cJSON_AddNumberToObject(errors, "last_query_time", error_status->last_error_query_time);
+    
+    // 添加详细的错误描述
+    char error_desc_buffer[512];
+    
+    motor_control_parse_error_bits(error_status->motor_error, 0, error_desc_buffer, sizeof(error_desc_buffer));
+    cJSON_AddStringToObject(errors, "motor_error_desc", error_desc_buffer);
+    
+    motor_control_parse_error_bits(error_status->encoder_error, 1, error_desc_buffer, sizeof(error_desc_buffer));
+    cJSON_AddStringToObject(errors, "encoder_error_desc", error_desc_buffer);
+    
+    motor_control_parse_error_bits(error_status->controller_error, 3, error_desc_buffer, sizeof(error_desc_buffer));
+    cJSON_AddStringToObject(errors, "controller_error_desc", error_desc_buffer);
+    
+    motor_control_parse_error_bits(error_status->system_error, 4, error_desc_buffer, sizeof(error_desc_buffer));
+    cJSON_AddStringToObject(errors, "system_error_desc", error_desc_buffer);
+    
+    cJSON_AddItemToObject(response, "errors", errors);
     
     char *response_string = cJSON_Print(response);
     
@@ -429,7 +698,7 @@ bool web_server_start(web_server_handle_t* handle) {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = WEB_SERVER_PORT;
     config.max_open_sockets = 7;
-    config.max_uri_handlers = 8;
+    config.max_uri_handlers = 16;
     
     esp_err_t ret = httpd_start(&handle->server, &config);
     if (ret != ESP_OK) {
@@ -486,6 +755,78 @@ bool web_server_start(web_server_handle_t* handle) {
         .user_ctx = handle
     };
     httpd_register_uri_handler(handle->server, &config_reset_uri);
+    
+    // Debug页面
+    httpd_uri_t debug_uri = {
+        .uri = "/debug",
+        .method = HTTP_GET,
+        .handler = debug_handler,
+        .user_ctx = handle
+    };
+    httpd_register_uri_handler(handle->server, &debug_uri);
+    
+    // Debug API - 查询特定错误
+    httpd_uri_t debug_query_error_uri = {
+        .uri = "/api/debug/query-error",
+        .method = HTTP_POST,
+        .handler = debug_query_error_handler,
+        .user_ctx = handle
+    };
+    httpd_register_uri_handler(handle->server, &debug_query_error_uri);
+    
+    // Debug API - 清除错误
+    httpd_uri_t debug_clear_errors_uri = {
+        .uri = "/api/debug/clear-errors",
+        .method = HTTP_POST,
+        .handler = debug_clear_errors_handler,
+        .user_ctx = handle
+    };
+    httpd_register_uri_handler(handle->server, &debug_clear_errors_uri);
+    
+    // Debug API - 使能电机
+    httpd_uri_t debug_enable_motor_uri = {
+        .uri = "/api/debug/enable-motor",
+        .method = HTTP_POST,
+        .handler = debug_enable_motor_handler,
+        .user_ctx = handle
+    };
+    httpd_register_uri_handler(handle->server, &debug_enable_motor_uri);
+    
+    // Debug API - 重启电机
+    httpd_uri_t debug_restart_motor_uri = {
+        .uri = "/api/debug/restart-motor",
+        .method = HTTP_POST,
+        .handler = debug_restart_motor_handler,
+        .user_ctx = handle
+    };
+    httpd_register_uri_handler(handle->server, &debug_restart_motor_uri);
+    
+    // Debug API - 启动平衡控制
+    httpd_uri_t debug_start_balance_uri = {
+        .uri = "/api/debug/start-balance",
+        .method = HTTP_POST,
+        .handler = debug_start_balance_handler,
+        .user_ctx = handle
+    };
+    httpd_register_uri_handler(handle->server, &debug_start_balance_uri);
+    
+    // Debug API - 停止平衡控制
+    httpd_uri_t debug_stop_balance_uri = {
+        .uri = "/api/debug/stop-balance",
+        .method = HTTP_POST,
+        .handler = debug_stop_balance_handler,
+        .user_ctx = handle
+    };
+    httpd_register_uri_handler(handle->server, &debug_stop_balance_uri);
+    
+    // Debug API - 获取错误状态
+    httpd_uri_t debug_error_status_uri = {
+        .uri = "/api/debug/error-status",
+        .method = HTTP_GET,
+        .handler = debug_error_status_handler,
+        .user_ctx = handle
+    };
+    httpd_register_uri_handler(handle->server, &debug_error_status_uri);
     
     // 注册WebSocket处理器
     httpd_uri_t ws_uri = {

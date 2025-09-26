@@ -72,7 +72,7 @@ static void realtime_display_task(void *pvParameters) {
 static void balance_control_task(void *pvParameters) {
     balance_controller_handle_t* handle = (balance_controller_handle_t*)pvParameters;
     
-    const TickType_t xFrequency = pdMS_TO_TICKS(5); // 5ms, 200Hz
+    const TickType_t xFrequency = pdMS_TO_TICKS(100); // 100ms, 10Hz
     TickType_t xLastWakeTime = xTaskGetTickCount();
     
     // 控制状态变量
@@ -90,7 +90,7 @@ static void balance_control_task(void *pvParameters) {
     
     // 速度指令发送计时器
     TickType_t xLastVelocityTime = xTaskGetTickCount();
-    const TickType_t xVelocityFrequency = pdMS_TO_TICKS(10); // 10ms发送一次
+    const TickType_t xVelocityFrequency = pdMS_TO_TICKS(100); // 100ms发送一次
     
     while (handle->running) {
         vTaskDelayUntil(&xLastWakeTime, xFrequency);
@@ -269,6 +269,8 @@ balance_controller_handle_t* balance_controller_init(shared_data_t* shared_data)
     return handle;
 }
 
+extern "C" {
+
 bool balance_controller_start(balance_controller_handle_t* handle) {
     if (!handle || !handle->initialized) {
         ESP_LOGE(TAG, "Balance controller handle not initialized");
@@ -352,3 +354,5 @@ void balance_controller_destroy(balance_controller_handle_t* handle) {
     free(handle);
     ESP_LOGI(TAG, "Balance controller destroyed");
 }
+
+} // extern "C"
