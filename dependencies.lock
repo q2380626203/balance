@@ -6,7 +6,7 @@ dependencies:
   nimble_central_utils:
     dependencies: []
     source:
-      path: /home/yaui/esp-idf/examples/bluetooth/nimble/common/nimble_central_utils
+      path: D:\ESP32\v5.4.1\esp-idf\examples\bluetooth\nimble\common\nimble_central_utils
       type: local
     version: '*'
 direct_dependencies:

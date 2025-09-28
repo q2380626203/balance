@@ -7,10 +7,49 @@ extern "C" {
 #endif
 
 // =====================================================================================
+// --- PID控制器结构体 ---
+// =====================================================================================
+
+typedef struct {
+    float kp;           // 比例系数
+    float ki;           // 积分系数
+    float kd;           // 微分系数
+    float integral;     // 积分项
+    float prev_error;   // 上一次误差
+    float output_min;   // 输出最小值
+    float output_max;   // 输出最大值
+    float integral_min; // 积分限幅最小值
+    float integral_max; // 积分限幅最大值
+} pid_controller_t;
+
+// =====================================================================================
 // --- 平衡控制器句柄 ---
 // =====================================================================================
 
 typedef struct balance_controller_handle balance_controller_handle_t;
+
+// =====================================================================================
+// --- PID控制器函数 ---
+// =====================================================================================
+
+/**
+ * @brief 初始化PID控制器
+ */
+void pid_init(pid_controller_t* pid, float kp, float ki, float kd, float output_min, float output_max);
+
+/**
+ * @brief 更新PID控制器并计算输出
+ * @param pid PID控制器句柄
+ * @param error 当前误差
+ * @param dt 时间间隔(秒)
+ * @return PID输出值
+ */
+float pid_update(pid_controller_t* pid, float error, float dt);
+
+/**
+ * @brief 重置PID控制器状态
+ */
+void pid_reset(pid_controller_t* pid);
 
 // =====================================================================================
 // --- 公共接口函数 ---

@@ -50,6 +50,11 @@ typedef struct {
     uint32_t uptime_ms;
     uint32_t control_loop_count;
     float cpu_usage_percent;
+
+    // 新增PID相关状态变量
+    float pid_output;           // PID控制器输出
+    float filtered_pitch;       // 滤波后的PITCH角度
+    float pitch_derivative;     // PITCH角变化率
 } system_status_t;
 
 // =====================================================================================
